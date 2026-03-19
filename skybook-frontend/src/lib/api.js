@@ -50,12 +50,12 @@ export function mapFlight(flight, index = 0) {
   return {
     id: String(flight.flight_id),
     airline: flight.airline || "SkyBook Air",
-    code: flight.code || `FL ${flight.flight_id}`,
+    code: flight.code || flight.flight_number || `FL ${flight.flight_id}`,
     departure: flight.departure_time_display || "--:--",
     arrival: flight.arrival_time_display || "--:--",
     duration: flight.duration_display || "TBD",
     stops: flight.stops || "Nonstop",
-    price: Number(flight.price || 0),
+    price: Number(flight.price || flight.base_price || 0),
     logo: flight.logo || (flight.airline || "SK").slice(0, 2).toUpperCase(),
     accent: accents[index % accents.length],
   };
@@ -68,8 +68,10 @@ export function mapHotel(hotel, index = 0) {
     rating: hotel.rating || 0,
     pricePerDay: Number(hotel.price_per_night || 0),
     location: `${hotel.city || "City"}${hotel.country_name ? `, ${hotel.country_name}` : ""}`,
-    details: "Real hotel data from PostgreSQL",
-    image: hotelGradients[index % hotelGradients.length],
+    details: hotel.description || "Real hotel data from PostgreSQL",
+    image: hotel.image_url
+      ? `linear-gradient(135deg, rgba(15,23,42,0.12), rgba(15,23,42,0.28)), url("${hotel.image_url}")`
+      : hotelGradients[index % hotelGradients.length],
   };
 }
 
@@ -77,25 +79,34 @@ export function mapCar(car, index = 0) {
   return {
     id: String(car.car_id),
     name: `${car.company || "Rental"} ${car.car_model || "Car"}`.trim(),
-    rating: car.rating || 0,
+    rating: 4.5,
     pricePerDay: Number(car.price_per_day || 0),
-    type: `${car.car_seats || 4} seats${car.availability === false ? " • unavailable" : ""}`,
-    details: `Pickup in ${car.city || "selected city"}`,
-    image: carGradients[index % carGradients.length],
+    type: `${car.car_type || "Standard"} | ${car.car_seats || 4} seats${car.availability === false ? " | unavailable" : ""}`,
+    details: car.description || `Pickup in ${car.city || "selected city"}`,
+    image: car.image_url
+      ? `linear-gradient(135deg, rgba(15,23,42,0.12), rgba(15,23,42,0.28)), url("${car.image_url}")`
+      : carGradients[index % carGradients.length],
   };
 }
 
 export function mapBooking(booking) {
+  const outboundDate = booking.outbound_date || "";
+  const returnDate = booking.return_date || "";
+
   return {
     id: booking.booking_id,
     destination:
       booking.hotel_details?.city ||
       booking.flight_details?.arrival_city ||
       "Planned trip",
-    dates: booking.booking_date || "Saved booking",
-    status: "Confirmed",
+    dates:
+      outboundDate && returnDate
+        ? `${outboundDate} to ${returnDate}`
+        : outboundDate || returnDate || "Saved booking",
+    status: booking.booking_status || "Confirmed",
     total: Number(booking.total_price || 0),
     flight: booking.flight_details ? mapFlight(booking.flight_details) : null,
+    returnFlight: booking.return_flight_details ? mapFlight(booking.return_flight_details) : null,
     hotel: booking.hotel_details ? mapHotel(booking.hotel_details) : null,
     car: booking.car_details ? mapCar(booking.car_details) : null,
   };

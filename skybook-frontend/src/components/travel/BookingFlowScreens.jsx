@@ -651,8 +651,12 @@ export function PaymentScreen({ initialParams }) {
         flight: selectedFlight?.id,
         hotel: selectedHotel?.id,
         car: selectedCar?.id,
+        outbound_date: search.departure,
+        return_date: search.returnDate || search.departure,
         trip_days: duration,
         total_price: total,
+        passengers: extractPassengerCount(search.passengers),
+        seat_class: "Economy",
       });
       resetBooking();
       router.push("/my-bookings?confirmed=true");
@@ -1188,4 +1192,9 @@ function hasMultiCityStopover(segments) {
   }
 
   return false;
+}
+
+function extractPassengerCount(value) {
+  const match = String(value || "").match(/\d+/);
+  return match ? Number(match[0]) : 1;
 }

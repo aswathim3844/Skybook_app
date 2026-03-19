@@ -1,6 +1,7 @@
+from datetime import timedelta
 from decimal import Decimal
 from django.contrib.auth.hashers import check_password, make_password
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -18,22 +19,28 @@ from .serializers import (
 
 @api_view(["GET"])
 def get_flights(request):
-    queryset = Flights.objects.select_related(
-        "departure_airport", "arrival_airport"
-    ).all()
+    queryset = Flights.objects.select_related("departure_airport", "arrival_airport").all()
 
     from_city = request.GET.get("from")
     to_city = request.GET.get("to")
     departure_date = request.GET.get("departure")
 
     if from_city:
-        queryset = queryset.filter(departure_airport__city__icontains=from_city)
+        queryset = queryset.filter(
+            Q(departure_airport__city__icontains=from_city)
+            | Q(departure_airport__city_code__icontains=from_city)
+            | Q(departure_airport__airport_name__icontains=from_city)
+        )
     if to_city:
-        queryset = queryset.filter(arrival_airport__city__icontains=to_city)
+        queryset = queryset.filter(
+            Q(arrival_airport__city__icontains=to_city)
+            | Q(arrival_airport__city_code__icontains=to_city)
+            | Q(arrival_airport__airport_name__icontains=to_city)
+        )
     if departure_date:
         queryset = queryset.filter(departure_time__date=departure_date)
 
-    return Response(FlightSerializer(queryset, many=True).data)
+    return Response(FlightSerializer(queryset.order_by("departure_time"), many=True).data)
 
 
 @api_view(["GET"])
@@ -44,7 +51,7 @@ def get_hotels(request):
     if city:
         queryset = queryset.filter(city__icontains=city)
 
-    return Response(HotelSerializer(queryset, many=True).data)
+    return Response(HotelSerializer(queryset.order_by("-rating", "hotel_name"), many=True).data)
 
 
 @api_view(["GET"])
@@ -58,7 +65,7 @@ def get_cars(request):
     if available_only == "true":
         queryset = queryset.filter(availability=True)
 
-    return Response(CarSerializer(queryset, many=True).data)
+    return Response(CarSerializer(queryset.order_by("company", "car_model"), many=True).data)
 
 
 @api_view(["GET", "POST"])
@@ -67,10 +74,13 @@ def get_bookings(request):
         queryset = Bookings.objects.select_related(
             "customer",
             "flight",
+            "return_flight",
             "hotel",
             "car",
             "flight__departure_airport",
             "flight__arrival_airport",
+            "return_flight__departure_airport",
+            "return_flight__arrival_airport",
             "hotel__country",
             "car__country",
         ).order_by("-booking_id")
@@ -82,37 +92,61 @@ def get_bookings(request):
         return Response(BookingSerializer(queryset, many=True).data)
 
     flight_id = request.data.get("flight")
+    return_flight_id = request.data.get("return_flight")
     hotel_id = request.data.get("hotel")
     car_id = request.data.get("car")
     customer_id = request.data.get("customer")
-    trip_days = request.data.get("trip_days")
     total_price = request.data.get("total_price")
+    outbound_date = request.data.get("outbound_date")
+    return_date = request.data.get("return_date")
+    trip_days = request.data.get("trip_days")
+    passengers = request.data.get("passengers")
+    seat_class = request.data.get("seat_class")
+
+    today = timezone.now().date()
+    outbound_value = parse_date_value(outbound_date) or today
+    return_value = parse_date_value(return_date)
+
+    if return_value is None:
+      if trip_days:
+          try:
+              return_value = outbound_value + timedelta(days=max(int(trip_days), 0))
+          except (TypeError, ValueError):
+              return_value = outbound_value
+      else:
+          return_value = outbound_value
 
     booking = Bookings.objects.create(
         customer_id=customer_id or None,
         flight_id=flight_id or None,
+        return_flight_id=return_flight_id or None,
         hotel_id=hotel_id or None,
         car_id=car_id or None,
-        trip_days=trip_days or None,
+        outbound_date=outbound_value,
+        return_date=return_value,
+        is_bundle=bool(hotel_id or car_id or return_flight_id),
         total_price=Decimal(str(total_price)) if total_price is not None else None,
-        booking_date=timezone.now().date(),
+        booking_status="Confirmed",
+        passengers=parse_int_value(passengers) or 1,
+        seat_class=seat_class or "Economy",
+        created_at=timezone.now(),
     )
 
     queryset = Bookings.objects.select_related(
         "customer",
         "flight",
+        "return_flight",
         "hotel",
         "car",
         "flight__departure_airport",
         "flight__arrival_airport",
+        "return_flight__departure_airport",
+        "return_flight__arrival_airport",
         "hotel__country",
         "car__country",
     ).get(pk=booking.pk)
 
-    return Response(
-        BookingSerializer(queryset).data,
-        status=status.HTTP_201_CREATED,
-    )
+    return Response(BookingSerializer(queryset).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET"])
@@ -161,14 +195,12 @@ def register_customer(request):
         email=email,
         phone=phone,
         country=country,
-        password=make_password(password),
+        password_hash=make_password(password),
+        created_at=timezone.now(),
     )
 
     return Response(
-        {
-            "message": "Account created successfully.",
-            "customer": CustomerSerializer(customer).data,
-        },
+        {"message": "Account created successfully.", "customer": CustomerSerializer(customer).data},
         status=status.HTTP_201_CREATED,
     )
 
@@ -180,7 +212,7 @@ def login_customer(request):
 
     customer = Customers.objects.select_related("country").filter(email=email).first()
 
-    if customer is None or not check_password(password, customer.password or ""):
+    if customer is None or not check_password(password, customer.password_hash or ""):
         return Response(
             {"message": "Invalid email or password."},
             status=status.HTTP_401_UNAUTHORIZED,
@@ -200,10 +232,7 @@ def customer_account(request, customer_id):
     customer = Customers.objects.select_related("country").filter(pk=customer_id).first()
 
     if customer is None:
-        return Response(
-            {"message": "Customer not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
+        return Response({"message": "Customer not found."}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "PUT":
         name = (request.data.get("name") or "").strip()
@@ -241,10 +270,9 @@ def customer_account(request, customer_id):
         customer.country = country
 
         if password:
-            customer.password = make_password(password)
+            customer.password_hash = make_password(password)
 
         customer.save()
-
         customer = Customers.objects.select_related("country").get(pk=customer.pk)
 
         return Response(
@@ -255,24 +283,40 @@ def customer_account(request, customer_id):
             }
         )
 
-    return Response(
-        {
-            "customer": CustomerSerializer(customer).data,
-            "summary": build_customer_summary(customer),
-        }
-    )
+    return Response({"customer": CustomerSerializer(customer).data, "summary": build_customer_summary(customer)})
 
 
 def build_customer_summary(customer):
     bookings = Bookings.objects.filter(customer=customer)
     booking_count = bookings.count()
+    upcoming_trips = bookings.filter(return_date__gte=timezone.now().date()).count()
     total_spent = bookings.aggregate(total=Sum("total_price")).get("total") or Decimal("0")
 
     return {
         "booking_count": booking_count,
-        "upcoming_trips": booking_count,
+        "upcoming_trips": upcoming_trips,
         "loyalty_points": int(total_spent // Decimal("10")),
     }
+
+
+def parse_date_value(value):
+    if not value:
+        return None
+
+    try:
+        return timezone.datetime.fromisoformat(str(value)).date()
+    except ValueError:
+        try:
+            return timezone.datetime.strptime(str(value), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+
+def parse_int_value(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @api_view(["GET"])
