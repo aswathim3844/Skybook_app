@@ -39,6 +39,17 @@ async function request(path, options = {}) {
   return response.json();
 }
 
+function normalizeLocationInput(value) {
+  if (!value) {
+    return "";
+  }
+
+  return value
+    .replace(/\s*\([A-Za-z]{3}\)\s*$/, "")
+    .split(",")[0]
+    .trim();
+}
+
 export function mapFlight(flight, index = 0) {
   const accents = [
     "from-sky-500 to-cyan-400",
@@ -114,8 +125,8 @@ export function mapBooking(booking) {
 
 export async function fetchFlights(search) {
   const params = new URLSearchParams({
-    from: search.from || "",
-    to: search.to || "",
+    from: normalizeLocationInput(search.from),
+    to: normalizeLocationInput(search.to),
     departure: search.departure || "",
   });
 
@@ -125,7 +136,7 @@ export async function fetchFlights(search) {
 
 export async function fetchHotels(search) {
   const params = new URLSearchParams({
-    city: search.to || "",
+    city: normalizeLocationInput(search.to),
   });
 
   const data = await request(`/hotels/?${params.toString()}`);
@@ -134,10 +145,15 @@ export async function fetchHotels(search) {
 
 export async function fetchCars(search) {
   const params = new URLSearchParams({
-    city: search.to || "",
+    city: normalizeLocationInput(search.to),
   });
 
   const data = await request(`/cars/?${params.toString()}`);
+  return data.map(mapCar);
+}
+
+export async function fetchAllCars() {
+  const data = await request("/cars/");
   return data.map(mapCar);
 }
 
@@ -158,6 +174,42 @@ export async function createBooking(payload) {
 
 export async function fetchCountries() {
   return request("/countries/");
+}
+
+export async function fetchFlightLocations() {
+  return request("/flight-locations/");
+}
+
+export async function sendAIChatMessage(payload) {
+  return request("/chat", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function searchPlannerFlights(payload) {
+  return request("/flights/search", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function searchPlannerHotels(payload) {
+  return request("/hotels/search", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function searchPlannerCars(payload) {
+  return request("/cars/search", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function retrieveBooking(reference) {
+  return request(`/bookings/${encodeURIComponent(reference)}/`);
 }
 
 export async function registerCustomer(payload) {

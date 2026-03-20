@@ -134,6 +134,7 @@ class BookingSerializer(serializers.ModelSerializer):
     return_flight_details = FlightSerializer(source="return_flight", read_only=True)
     hotel_details = HotelSerializer(source="hotel", read_only=True)
     car_details = CarSerializer(source="car", read_only=True)
+    booking_reference = serializers.SerializerMethodField()
 
     class Meta:
         model = Bookings
@@ -149,6 +150,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "is_bundle",
             "total_price",
             "booking_status",
+            "booking_reference",
             "passengers",
             "seat_class",
             "created_at",
@@ -157,6 +159,9 @@ class BookingSerializer(serializers.ModelSerializer):
             "hotel_details",
             "car_details",
         ]
+
+    def get_booking_reference(self, obj):
+        return f"SNA{int(obj.booking_id):06d}"
 
 
 class CountrySerializer(serializers.ModelSerializer):

@@ -47,6 +47,9 @@ export function FlightResultsScreen({ initialParams }) {
   const tripType = search.tripType || "roundtrip";
   const multiCitySegments = search.multiCitySegments || [];
   const hasLongStopover = hasMultiCityStopover(multiCitySegments);
+  const searchFrom = search.from;
+  const searchTo = search.to;
+  const searchDeparture = search.departure;
 
   useEffect(() => {
     let active = true;
@@ -55,7 +58,11 @@ export function FlightResultsScreen({ initialParams }) {
       try {
         setLoading(true);
         setError("");
-        const data = await fetchFlights(search);
+        const data = await fetchFlights({
+          from: searchFrom,
+          to: searchTo,
+          departure: searchDeparture,
+        });
         if (active) {
           setFlights(data);
         }
@@ -74,7 +81,7 @@ export function FlightResultsScreen({ initialParams }) {
     return () => {
       active = false;
     };
-  }, [search]);
+  }, [searchDeparture, searchFrom, searchTo]);
 
   const airlineOptions = Array.from(new Set(flights.map((flight) => flight.airline))).filter(
     Boolean
@@ -279,6 +286,7 @@ export function HotelSelectionScreen({ initialParams }) {
   const isHotelSaved = useSavedStore((state) => state.isHotelSaved);
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const tripType = search.tripType || "roundtrip";
+  const destinationCity = search.to;
 
   useEffect(() => {
     let active = true;
@@ -287,7 +295,9 @@ export function HotelSelectionScreen({ initialParams }) {
       try {
         setLoading(true);
         setError("");
-        const data = await fetchHotels(search);
+        const data = await fetchHotels({
+          to: destinationCity,
+        });
         if (active) {
           setHotels(data);
         }
@@ -306,7 +316,7 @@ export function HotelSelectionScreen({ initialParams }) {
     return () => {
       active = false;
     };
-  }, [search]);
+  }, [destinationCity]);
 
   const activeHotel = hotels.find((hotel) => hotel.id === selectedHotelId) || hotels[0];
   const safeFlight = selectedFlight;
@@ -399,6 +409,7 @@ export function CarRentalScreen({ initialParams }) {
   const isCarSaved = useSavedStore((state) => state.isCarSaved);
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const tripType = search.tripType || "roundtrip";
+  const rentalCity = search.to;
 
   useEffect(() => {
     let active = true;
@@ -407,7 +418,9 @@ export function CarRentalScreen({ initialParams }) {
       try {
         setLoading(true);
         setError("");
-        const data = await fetchCars(search);
+        const data = await fetchCars({
+          to: rentalCity,
+        });
         if (active) {
           setCars(data);
         }
@@ -426,7 +439,7 @@ export function CarRentalScreen({ initialParams }) {
     return () => {
       active = false;
     };
-  }, [search]);
+  }, [rentalCity]);
 
   const activeCar = cars.find((car) => car.id === selectedCarId) || cars[0];
   const total =
@@ -775,6 +788,7 @@ function TripRecommendationsSection({
   const isHotelSaved = useSavedStore((state) => state.isHotelSaved);
   const toggleSavedCar = useSavedStore((state) => state.toggleSavedCar);
   const isCarSaved = useSavedStore((state) => state.isCarSaved);
+  const recommendationCity = search.to;
 
   useEffect(() => {
     let active = true;
@@ -782,8 +796,12 @@ function TripRecommendationsSection({
     async function loadRecommendations() {
       try {
         const [hotelData, carData] = await Promise.all([
-          fetchHotels(search),
-          fetchCars(search),
+          fetchHotels({
+            to: recommendationCity,
+          }),
+          fetchCars({
+            to: recommendationCity,
+          }),
         ]);
         if (active) {
           setHotels(hotelData);
@@ -801,7 +819,7 @@ function TripRecommendationsSection({
     return () => {
       active = false;
     };
-  }, [search]);
+  }, [recommendationCity]);
 
   return (
     <PageSection

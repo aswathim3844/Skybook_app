@@ -37,6 +37,7 @@ export default function HeroImageSlideshow() {
               src={src}
               alt={`Travel inspiration ${index + 1}`}
               fill
+              sizes="(max-width: 768px) 100vw, (max-width: 1280px) 90vw, 720px"
               priority={index === 0}
               className="object-cover"
             />

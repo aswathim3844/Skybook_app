@@ -6,22 +6,22 @@ import { create } from "zustand";
 export const defaultBookingSearch = {
   tripType: "roundtrip",
   from: "Kochi, COK",
-  to: "Paris, France",
-  departure: "2026-04-18",
-  returnDate: "2026-04-23",
+  to: "London, United Kingdom (LHR)",
+  departure: "2025-06-04",
+  returnDate: "2025-06-08",
   passengers: "2 Adults",
   multiCitySegments: [
     {
       id: "segment-1",
       from: "Kochi, COK",
-      to: "Paris, France",
-      departure: "2026-04-18",
+      to: "London, United Kingdom (LHR)",
+      departure: "2025-06-04",
     },
     {
       id: "segment-2",
-      from: "Paris, France",
+      from: "London, United Kingdom (LHR)",
       to: "Rome, Italy",
-      departure: "2026-04-20",
+      departure: "2025-06-06",
     },
   ],
 };

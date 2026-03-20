@@ -1,13 +1,7 @@
 import FlightSearchForm from "@/components/travel/FlightSearchForm";
 import SiteFooter from "@/components/travel/SiteFooter";
 import Navbar from "@/components/ui/Navbar";
-import {
-  DestinationCard,
-  PageHero,
-  PageSection,
-  SecondaryLink,
-} from "@/components/travel/TravelUI";
-import { popularDestinations } from "@/lib/mock-data";
+import { PageHero, SecondaryLink } from "@/components/travel/TravelUI";
 
 export default function SearchFlightsPage() {
   return (
@@ -30,18 +24,6 @@ export default function SearchFlightsPage() {
           <FlightSearchForm />
         </div>
       </section>
-
-      <PageSection
-        eyebrow="Suggested"
-        title="Popular destinations"
-        description="Helpful destination cards reduce the empty-state feeling and help users start searching faster."
-      >
-        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          {popularDestinations.map((destination) => (
-            <DestinationCard key={destination.id} destination={destination} />
-          ))}
-        </div>
-      </PageSection>
 
       <SiteFooter />
     </main>

@@ -1,5 +1,4 @@
 import AIPlannerExperience from "@/components/travel/AIPlannerExperience";
-import HeroImageSlideshow from "@/components/travel/HeroImageSlideshow";
 import Link from "next/link";
 import SiteFooter from "@/components/travel/SiteFooter";
 import Navbar from "@/components/ui/Navbar";
@@ -27,14 +26,10 @@ export default function AIPlannerPage() {
             </Link>
           </div>
         }
-        title="Chat-first travel planning"
-        description="Tell us where you want to go — our AI builds the perfect journey."
-        descriptionClassName="max-w-xl text-[1.08rem] font-medium italic leading-8 text-cyan-50 sm:text-[1.2rem]"
-      >
-        <HeroImageSlideshow />
-      </PageHero>
+        title="AI Trip Planner That Books The Whole Journey"
+      />
 
-      <section className="mx-auto max-w-7xl px-6 py-16 sm:px-8 lg:px-12">
+      <section className="mx-auto max-w-7xl px-6 py-10 sm:px-8 lg:px-12">
         <AIPlannerExperience />
       </section>
 
