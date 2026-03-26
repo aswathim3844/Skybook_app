@@ -5,7 +5,7 @@ import { create } from "zustand";
 
 export const defaultBookingSearch = {
   tripType: "roundtrip",
-  from: "Kochi, COK",
+  from: "Mumbai, India (BOM)",
   to: "London, United Kingdom (LHR)",
   departure: "2025-06-04",
   returnDate: "2025-06-08",
@@ -13,14 +13,14 @@ export const defaultBookingSearch = {
   multiCitySegments: [
     {
       id: "segment-1",
-      from: "Kochi, COK",
+      from: "Mumbai, India (BOM)",
       to: "London, United Kingdom (LHR)",
       departure: "2025-06-04",
     },
     {
       id: "segment-2",
       from: "London, United Kingdom (LHR)",
-      to: "Rome, Italy",
+      to: "Dubai, United Arab Emirates (DXB)",
       departure: "2025-06-06",
     },
   ],

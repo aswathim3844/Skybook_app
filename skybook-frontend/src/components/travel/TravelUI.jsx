@@ -157,7 +157,7 @@ export function FlightCard({
 }) {
   return (
     <article className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex items-center gap-4">
           <div
             className={`flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br text-sm font-semibold text-white ${accentClassName || flight.accent}`}
@@ -170,23 +170,23 @@ export function FlightCard({
           </div>
         </div>
 
-        <div className="grid flex-1 gap-4 text-sm text-slate-600 sm:grid-cols-3 lg:px-6">
-          <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Departure</p>
-            <p className="mt-1 text-xl font-semibold text-slate-900">{flight.departure}</p>
+        <div className="grid flex-1 gap-3 text-sm text-slate-600 sm:grid-cols-3 xl:px-6">
+          <div className="min-w-0 rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Departure</p>
+            <p className="mt-2 text-xl font-semibold leading-none text-slate-900">{flight.departure}</p>
           </div>
-          <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Arrival</p>
-            <p className="mt-1 text-xl font-semibold text-slate-900">{flight.arrival}</p>
+          <div className="min-w-0 rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Arrival</p>
+            <p className="mt-2 text-xl font-semibold leading-none text-slate-900">{flight.arrival}</p>
           </div>
-          <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Duration</p>
-            <p className="mt-1 text-xl font-semibold text-slate-900">{flight.duration}</p>
-            <p className="mt-1 text-xs text-slate-500">{flight.stops}</p>
+          <div className="min-w-0 rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">Duration</p>
+            <p className="mt-2 text-xl font-semibold leading-none text-slate-900">{flight.duration}</p>
+            <p className="mt-2 text-xs text-slate-500">{flight.stops}</p>
           </div>
         </div>
 
-        <div className="flex flex-col items-start gap-3 lg:items-end">
+        <div className="flex flex-col items-start gap-3 xl:items-end">
           <p className="text-2xl font-semibold text-slate-900">{formatCurrency(flight.price)}</p>
           {onToggleSave ? (
             <button

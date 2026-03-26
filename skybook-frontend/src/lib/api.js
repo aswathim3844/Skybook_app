@@ -39,6 +39,29 @@ async function request(path, options = {}) {
   return response.json();
 }
 
+async function requestWithStatus(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    ...options,
+  });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data: payload,
+  };
+}
+
 function normalizeLocationInput(value) {
   if (!value) {
     return "";
@@ -185,6 +208,64 @@ export async function sendAIChatMessage(payload) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function createPlannerSession(payload) {
+  return request("/planner/sessions/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchPlannerSessions(customerId) {
+  const suffix = customerId ? `?customer_id=${customerId}` : "";
+  return request(`/planner/sessions/${suffix}`);
+}
+
+export async function fetchPlannerSession(sessionId) {
+  return request(`/planner/sessions/${sessionId}/`);
+}
+
+export async function sendPlannerSessionMessage(sessionId, payload) {
+  return request(`/planner/sessions/${sessionId}/messages/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generatePlannerSessionPlan(sessionId, payload) {
+  return request(`/planner/sessions/${sessionId}/plan/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function revalidatePlannerDraft(sessionId, draftId) {
+  return request(`/planner/sessions/${sessionId}/drafts/${draftId}/revalidate/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function updatePlannerDraft(sessionId, draftId, payload) {
+  return request(`/planner/sessions/${sessionId}/drafts/${draftId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchProviderStatus() {
+  return request("/planner/provider-status/");
+}
+
+export async function fetchHealthStatus() {
+  const response = await requestWithStatus("/health/");
+  return { ...response.data, _http_status: response.status, _ok: response.ok };
+}
+
+export async function fetchReadinessStatus() {
+  const response = await requestWithStatus("/ready/");
+  return { ...response.data, _http_status: response.status, _ok: response.ok };
 }
 
 export async function searchPlannerFlights(payload) {

@@ -1,0 +1,10 @@
+chromadb==1.0.21
+langchain-chroma==0.2.6
+langchain-community==0.3.30
+langchain-core==0.3.76
+langchain-huggingface==0.3.1
+langchain-openai==0.3.33
+langchain-text-splitters==0.3.11
+openai==1.107.2
+python-dotenv==1.1.1
+sentence-transformers==5.1.1

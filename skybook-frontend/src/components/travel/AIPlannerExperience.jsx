@@ -16,13 +16,17 @@ import {
 } from "lucide-react";
 import {
   createBooking,
+  createPlannerSession,
   fetchAllCars,
   fetchFlightLocations,
+  fetchPlannerSessions,
+  fetchPlannerSession,
+  fetchProviderStatus,
+  generatePlannerSessionPlan,
+  revalidatePlannerDraft,
   retrieveBooking,
-  searchPlannerCars,
-  searchPlannerFlights,
-  searchPlannerHotels,
-  sendAIChatMessage,
+  sendPlannerSessionMessage,
+  updatePlannerDraft,
 } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 import { formatCurrency } from "@/lib/mock-data";
@@ -75,6 +79,12 @@ export default function AIPlannerExperience() {
   const [lookupError, setLookupError] = useState("");
   const [lookupLoading, setLookupLoading] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [plannerSessionId, setPlannerSessionId] = useState(null);
+  const [currentDraftId, setCurrentDraftId] = useState(null);
+  const [revalidationState, setRevalidationState] = useState(null);
+  const [confirmingBooking, setConfirmingBooking] = useState(false);
+  const [providerStatus, setProviderStatus] = useState(null);
+  const [sessionHistory, setSessionHistory] = useState([]);
   const [locationOptions, setLocationOptions] = useState([]);
   const [carTypeOptions, setCarTypeOptions] = useState(["Any"]);
   const [selectedOutboundFlightId, setSelectedOutboundFlightId] = useState(null);
@@ -175,6 +185,29 @@ export default function AIPlannerExperience() {
   useEffect(() => {
     let active = true;
 
+    async function loadSessionHistory() {
+      try {
+        const sessions = await fetchPlannerSessions(customer?.customer_id || null);
+        if (active) {
+          setSessionHistory(Array.isArray(sessions) ? sessions : []);
+        }
+      } catch {
+        if (active) {
+          setSessionHistory([]);
+        }
+      }
+    }
+
+    loadSessionHistory();
+
+    return () => {
+      active = false;
+    };
+  }, [customer?.customer_id, confirmation?.id]);
+
+  useEffect(() => {
+    let active = true;
+
     async function loadLocations() {
       try {
         const locations = await fetchFlightLocations();
@@ -214,6 +247,27 @@ export default function AIPlannerExperience() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    async function loadProviderStatus() {
+      try {
+        const status = await fetchProviderStatus();
+        if (active) {
+          setProviderStatus(status);
+        }
+      } catch {
+        // Keep provider panel hidden when status endpoint is unavailable.
+      }
+    }
+
+    loadProviderStatus();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const nights = useMemo(
     () => getNightCount(form.departureDate, form.returnDate),
     [form.departureDate, form.returnDate],
@@ -244,6 +298,47 @@ export default function AIPlannerExperience() {
     results.hotels.length ||
     results.cars.length;
 
+  async function ensurePlannerSession() {
+    if (plannerSessionId) {
+      return plannerSessionId;
+    }
+
+    const session = await createPlannerSession({
+      customer_id: customer?.customer_id || null,
+      title: `${form.destination || "Trip"} planner`,
+      origin: form.origin,
+      destination: form.destination,
+      departure_date: form.departureDate,
+      return_date: form.returnDate,
+      passengers: form.passengers,
+      budget: form.budget,
+      trip_preferences: {
+        tripType: form.tripType,
+        seat_class: form.seatClass,
+        airline: form.airline,
+        hotel_style: form.hotelStyle,
+        hotel_amenities: form.hotelAmenities,
+        hotel_rating: form.hotelRating,
+        car_type: form.carType,
+        car_seats: form.carSeats,
+      },
+    });
+
+    setPlannerSessionId(session.session_id);
+    setSessionHistory((current) => [session, ...current.filter((item) => item.session_id !== session.session_id)]);
+
+    if (Array.isArray(session.messages) && session.messages.length > 0) {
+      setMessages(
+        session.messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+      );
+    }
+
+    return session.session_id;
+  }
+
   async function handleSend(messageOverride) {
     const content = (messageOverride ?? chatInput).trim();
     if (!content || chatLoading) return;
@@ -255,9 +350,9 @@ export default function AIPlannerExperience() {
     setChatLoading(true);
 
     try {
-      const response = await sendAIChatMessage({
+      const sessionId = await ensurePlannerSession();
+      const response = await sendPlannerSessionMessage(sessionId, {
         message: content,
-        history: nextMessages,
       });
       setMessages((current) => [
         ...current,
@@ -282,42 +377,57 @@ export default function AIPlannerExperience() {
     setSearching(true);
     setSearchError("");
     setConfirmation(null);
+    setRevalidationState(null);
     setActiveTab("flights");
 
     try {
-      const [outbound, returnFlights, hotels, cars] = await Promise.all([
-        searchPlannerFlights({
-          origin: activeForm.origin,
-          destination: activeForm.destination,
+      const sessionId = await ensurePlannerSession();
+      const draft = await generatePlannerSessionPlan(sessionId, {
+        origin: activeForm.origin,
+        destination: activeForm.destination,
+        departure_date: activeForm.departureDate,
+        return_date: activeForm.returnDate,
+        passengers: activeForm.passengers,
+        budget: activeForm.budget,
+        preferences: {
+          trip_type: activeForm.tripType,
           seat_class: activeForm.seatClass,
           airline: activeForm.airline,
-          min_seats: activeForm.passengers,
-        }),
-        searchPlannerFlights({
-          origin: activeForm.destination,
-          destination: activeForm.origin,
-          seat_class: activeForm.seatClass,
-          airline: activeForm.airline,
-          min_seats: activeForm.passengers,
-        }),
-        searchPlannerHotels({
-          city: activeForm.destination,
           hotel_style: activeForm.hotelStyle,
           hotel_amenities: activeForm.hotelAmenities,
           hotel_rating: activeForm.hotelRating,
-        }),
-        searchPlannerCars({
-          city: activeForm.destination,
           car_type: activeForm.carType,
-          min_seats: activeForm.carSeats,
-        }),
-      ]);
+          car_seats: activeForm.carSeats,
+        },
+      });
 
+      const session = await fetchPlannerSession(sessionId);
+      if (Array.isArray(session.messages) && session.messages.length > 0) {
+        setMessages(
+          session.messages.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+        );
+      }
+
+      const outbound = Array.isArray(draft.flight_options) ? draft.flight_options : [];
+      const returnFlights = Array.isArray(draft.return_flight_options)
+        ? draft.return_flight_options
+        : draft.selected_return_flight
+          ? [draft.selected_return_flight]
+          : [];
+      const hotels = Array.isArray(draft.hotel_options) ? draft.hotel_options : [];
+      const cars = Array.isArray(draft.car_options) ? draft.car_options : [];
+
+      setCurrentDraftId(draft.draft_id);
       setResults({ outbound, returnFlights, hotels, cars });
-      setSelectedOutboundFlightId(outbound[0]?.flight_id || null);
-      setSelectedReturnFlightId(returnFlights[0]?.flight_id || null);
-      setSelectedHotelId(hotels[0]?.hotel_id || null);
-      setSelectedCarId(cars[0]?.car_id || null);
+      setSelectedOutboundFlightId(draft.selected_flight?.flight_id || outbound[0]?.flight_id || null);
+      setSelectedReturnFlightId(
+        draft.selected_return_flight?.flight_id || returnFlights[0]?.flight_id || null,
+      );
+      setSelectedHotelId(draft.selected_hotel?.hotel_id || hotels[0]?.hotel_id || null);
+      setSelectedCarId(draft.selected_car?.car_id || cars[0]?.car_id || null);
 
       if (!outbound.length && !returnFlights.length && !hotels.length && !cars.length) {
         setSearchError(
@@ -334,25 +444,55 @@ export default function AIPlannerExperience() {
   }
 
   async function handleConfirm() {
-    if (!selectedFlight || !selectedHotel || !selectedCar) return;
+    if (!selectedFlight || !selectedHotel || !selectedCar || !plannerSessionId || !currentDraftId) return;
 
-    const response = await createBooking({
-      name: form.name,
-      email: form.email,
-      flight: selectedFlight.flight_id,
-      return_flight: selectedReturnFlight?.flight_id || null,
-      hotel: selectedHotel.hotel_id,
-      car: selectedCar.car_id,
-      check_in: form.departureDate,
-      check_out: form.returnDate,
-      nights,
-      passengers: form.passengers,
-      seat_class: form.seatClass,
-      total_price: pricing.grandTotal,
-    });
+    setConfirmingBooking(true);
+    setSearchError("");
 
-    setConfirmation(response);
-    persistPlannerLoyalty(response, pricing.grandTotal);
+    try {
+      await updatePlannerDraft(plannerSessionId, currentDraftId, {
+        selected_flight: selectedFlight,
+        selected_return_flight: selectedReturnFlight,
+        selected_hotel: selectedHotel,
+        selected_car: selectedCar,
+        budget: form.budget,
+        summary: `Selected package for ${form.destination} from ${form.origin} for ${form.passengers} traveler(s).`,
+      });
+
+      const revalidatedDraft = await revalidatePlannerDraft(plannerSessionId, currentDraftId);
+      setRevalidationState(revalidatedDraft.ai_metadata?.revalidation || null);
+
+      if (revalidatedDraft.status !== "validated") {
+        setSearchError(
+          "This draft needs review before booking. Please refresh the package or adjust your selected options.",
+        );
+        return;
+      }
+
+      const response = await createBooking({
+        name: form.name,
+        email: form.email,
+        flight: numericOrNull(selectedFlight.flight_id),
+        return_flight: numericOrNull(selectedReturnFlight?.flight_id),
+        hotel: numericOrNull(selectedHotel.hotel_id),
+        car: numericOrNull(selectedCar.car_id),
+        check_in: form.departureDate,
+        check_out: form.returnDate,
+        nights,
+        passengers: form.passengers,
+        seat_class: form.seatClass,
+        total_price: pricing.grandTotal,
+      });
+
+      setConfirmation(response);
+      persistPlannerLoyalty(response, pricing.grandTotal);
+    } catch {
+      setSearchError(
+        "We could not revalidate the current package. Please run the planner again and retry booking.",
+      );
+    } finally {
+      setConfirmingBooking(false);
+    }
   }
 
   async function handleLookup() {
@@ -369,6 +509,60 @@ export default function AIPlannerExperience() {
       setLookupError("Booking not found - check your reference");
     } finally {
       setLookupLoading(false);
+    }
+  }
+
+  async function handleLoadSession(sessionId) {
+    try {
+      const session = await fetchPlannerSession(sessionId);
+      setPlannerSessionId(session.session_id);
+      setMessages(
+        Array.isArray(session.messages) && session.messages.length > 0
+          ? session.messages.map((message) => ({
+              role: message.role,
+              content: message.content,
+            }))
+          : [
+              {
+                role: "assistant",
+                content:
+                  "Tell me where you want to go, what matters most, or ask about visa, weather, baggage, and cancellations. I will help shape the trip before you search.",
+              },
+            ],
+      );
+
+      const latestDraft = Array.isArray(session.drafts) && session.drafts.length > 0 ? session.drafts[0] : null;
+      setCurrentDraftId(latestDraft?.draft_id || null);
+      setForm((current) => ({
+        ...current,
+        origin: session.origin || current.origin,
+        destination: session.destination || current.destination,
+        departureDate: session.departure_date || current.departureDate,
+        returnDate: session.return_date || current.returnDate,
+        passengers: session.passengers || current.passengers,
+        budget: Number(session.budget || current.budget),
+      }));
+
+      if (latestDraft) {
+        const outbound = Array.isArray(latestDraft.flight_options) ? latestDraft.flight_options : [];
+        const returnFlights = Array.isArray(latestDraft.return_flight_options)
+          ? latestDraft.return_flight_options
+          : latestDraft.selected_return_flight
+            ? [latestDraft.selected_return_flight]
+            : [];
+        const hotels = Array.isArray(latestDraft.hotel_options) ? latestDraft.hotel_options : [];
+        const cars = Array.isArray(latestDraft.car_options) ? latestDraft.car_options : [];
+
+        setResults({ outbound, returnFlights, hotels, cars });
+        setSelectedOutboundFlightId(latestDraft.selected_flight?.flight_id || outbound[0]?.flight_id || null);
+        setSelectedReturnFlightId(
+          latestDraft.selected_return_flight?.flight_id || returnFlights[0]?.flight_id || null,
+        );
+        setSelectedHotelId(latestDraft.selected_hotel?.hotel_id || hotels[0]?.hotel_id || null);
+        setSelectedCarId(latestDraft.selected_car?.car_id || cars[0]?.car_id || null);
+      }
+    } catch {
+      setSearchError("We could not load that planner session right now.");
     }
   }
 
@@ -389,6 +583,25 @@ export default function AIPlannerExperience() {
                 the strongest bundle for your route, budget, and trip style.
               </p>
             </div>
+            {providerStatus ? (
+              <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3 text-right">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Runtime Mode
+                </p>
+                <p className="mt-2 text-sm font-semibold text-slate-900">
+                  Flights: {providerStatus.flight_provider}
+                </p>
+                <p className="text-sm text-slate-600">
+                  Hotels: {providerStatus.hotel_provider}
+                </p>
+                <p className="text-sm text-slate-600">
+                  Cars: {providerStatus.car_provider}
+                </p>
+                <p className="mt-2 text-xs font-medium text-slate-500">
+                  RAG: {providerStatus.rag_configured ? "configured" : "fallback"}
+                </p>
+              </div>
+            ) : null}
 
           </div>
 
@@ -690,6 +903,40 @@ export default function AIPlannerExperience() {
 
       <section className="grid gap-6 lg:grid-cols-[1.22fr_0.78fr]">
         <section className="order-2 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm lg:order-2">
+          {sessionHistory.length > 0 ? (
+            <div className="mb-6 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Recent Planner Sessions
+              </p>
+              <div className="mt-3 space-y-2">
+                {sessionHistory.slice(0, 3).map((session) => (
+                  <button
+                    key={session.session_id}
+                    type="button"
+                    onClick={() => handleLoadSession(session.session_id)}
+                    className={`flex w-full items-center justify-between rounded-[18px] border px-4 py-3 text-left text-sm transition ${
+                      plannerSessionId === session.session_id
+                        ? "border-orange-300 bg-white"
+                        : "border-slate-200 bg-white hover:border-slate-300"
+                    }`}
+                  >
+                    <span>
+                      <span className="block font-semibold text-slate-900">
+                        {session.title || `${session.destination || "Trip"} planner`}
+                      </span>
+                      <span className="block text-slate-500">
+                        {session.origin || "Origin"} -&gt; {session.destination || "Destination"}
+                      </span>
+                    </span>
+                    <span className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
+                      {session.status}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
             Booking Summary
           </p>
@@ -743,11 +990,26 @@ export default function AIPlannerExperience() {
 
           <button
             onClick={handleConfirm}
-            disabled={!selectedFlight || !selectedHotel || !selectedCar}
+            disabled={!selectedFlight || !selectedHotel || !selectedCar || !currentDraftId || confirmingBooking}
             className="mt-6 inline-flex min-h-12 w-full items-center justify-center rounded-full bg-orange-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Confirm & Book
+            {confirmingBooking ? "Revalidating Package..." : "Confirm & Book"}
           </button>
+
+          {revalidationState ? (
+            <div className="mt-4 rounded-[24px] border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+              <p className="font-semibold text-slate-900">Latest Revalidation</p>
+              <p className="mt-2">
+                Flight: {formatRevalidationStatus(revalidationState.flight)}
+              </p>
+              <p className="mt-1">
+                Hotel: {formatRevalidationStatus(revalidationState.hotel)}
+              </p>
+              <p className="mt-1">
+                Car: {formatRevalidationStatus(revalidationState.car)}
+              </p>
+            </div>
+          ) : null}
 
           {confirmation ? (
             <div className="mt-6 rounded-[28px] border border-emerald-200 bg-emerald-50 p-6">
@@ -967,64 +1229,79 @@ export default function AIPlannerExperience() {
         ) : null}
       </section>
 
-      <aside className="fixed bottom-6 right-6 z-40 hidden w-[380px] overflow-hidden rounded-[32px] border border-[#173a7a]/15 bg-[linear-gradient(180deg,#16356f_0%,#1f4f9d_100%)] text-white shadow-[0_30px_90px_rgba(23,58,122,0.35)] xl:block">
-        <ChatPanel
-          chatInput={chatInput}
-          chatLoading={chatLoading}
-          messages={messages}
-          onInputChange={setChatInput}
-          onSend={handleSend}
-          showQuickChips={showQuickChips}
-        />
-      </aside>
-
-      <button
-        type="button"
-        onClick={() => setChatOpen(true)}
-        className="fixed bottom-5 right-5 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full bg-[#173a7a] text-white shadow-[0_18px_40px_rgba(23,58,122,0.35)] transition hover:bg-[#102b5d] xl:hidden"
-        aria-label="Open AI Copilot"
-      >
-        <MessageCircle className="h-6 w-6" />
-      </button>
+      {!chatOpen ? (
+        <button
+          type="button"
+          onClick={() => setChatOpen(true)}
+          className="fixed bottom-5 right-5 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full bg-[#173a7a] text-white shadow-[0_18px_40px_rgba(23,58,122,0.35)] transition hover:bg-[#102b5d]"
+          aria-label="Open AI Copilot"
+        >
+          <MessageCircle className="h-6 w-6" />
+        </button>
+      ) : null}
 
       {chatOpen ? (
-        <div className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px] xl:hidden">
-          <aside className="absolute inset-0 overflow-hidden bg-[linear-gradient(180deg,#16356f_0%,#1f4f9d_100%)] text-white">
-            <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#173a7a]">
-                  <Bot className="h-5 w-5" />
+        <>
+          <div className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px] xl:hidden">
+            <aside className="absolute inset-0 overflow-hidden bg-[linear-gradient(180deg,#16356f_0%,#1f4f9d_100%)] text-white">
+              <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#173a7a]">
+                    <Bot className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-300">
+                      SkyBook AI Copilot
+                    </p>
+                    <p className="text-sm text-blue-50/80">Travel help on demand</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-300">
-                    SkyBook AI Copilot
-                  </p>
-                  <p className="text-sm text-blue-50/80">Travel help on demand</p>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setChatOpen(false)}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white"
+                  aria-label="Close AI Copilot"
+                >
+                  <ChevronDown className="h-5 w-5" />
+                </button>
               </div>
+
+              <div className="h-[calc(100%-76px)] p-4">
+                <ChatPanel
+                  chatInput={chatInput}
+                  chatLoading={chatLoading}
+                  messages={messages}
+                  onInputChange={setChatInput}
+                  onSend={handleSend}
+                  showQuickChips={showQuickChips}
+                  fullHeight
+                />
+              </div>
+            </aside>
+          </div>
+
+          <aside className="fixed bottom-6 right-6 z-40 hidden h-[min(720px,calc(100vh-8rem))] w-[380px] overflow-hidden rounded-[32px] border border-[#173a7a]/15 bg-[linear-gradient(180deg,#16356f_0%,#1f4f9d_100%)] text-white shadow-[0_30px_90px_rgba(23,58,122,0.35)] xl:flex xl:flex-col">
+            <div className="flex items-center justify-end border-b border-white/10 px-4 py-3">
               <button
                 type="button"
                 onClick={() => setChatOpen(false)}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white"
                 aria-label="Close AI Copilot"
               >
-                <ChevronDown className="h-5 w-5" />
+                <ChevronDown className="h-4 w-4" />
               </button>
             </div>
-
-            <div className="h-[calc(100%-76px)] p-4">
-              <ChatPanel
-                chatInput={chatInput}
-                chatLoading={chatLoading}
-                messages={messages}
-                onInputChange={setChatInput}
-                onSend={handleSend}
-                showQuickChips={showQuickChips}
-                fullHeight
-              />
-            </div>
+            <ChatPanel
+              chatInput={chatInput}
+              chatLoading={chatLoading}
+              messages={messages}
+              onInputChange={setChatInput}
+              onSend={handleSend}
+              showQuickChips={showQuickChips}
+              fullHeight
+            />
           </aside>
-        </div>
+        </>
       ) : null}
     </div>
   );
@@ -1539,6 +1816,24 @@ function getSeatPrice(flight, seatClass) {
 function clampPassengers(value) {
   const numeric = Number(value || 1);
   return Math.min(Math.max(numeric, 1), 9);
+}
+
+function formatRevalidationStatus(result) {
+  if (!result) {
+    return "Not required";
+  }
+
+  if (result.available) {
+    return `Confirmed (${result.status})`;
+  }
+
+  return "Unavailable";
+}
+
+function numericOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function getNightCount(departureDate, returnDate) {

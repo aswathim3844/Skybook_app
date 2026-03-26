@@ -140,3 +140,64 @@ class Payments(models.Model):
 
     class Meta:
         db_table = "payments"
+
+
+class PlannerSessions(models.Model):
+    session_id = models.BigAutoField(primary_key=True)
+    customer_id = models.IntegerField(blank=True, null=True)
+    title = models.CharField(max_length=255, blank=True, null=True)
+    status = models.CharField(max_length=30, default="active")
+    origin = models.CharField(max_length=255, blank=True, null=True)
+    destination = models.CharField(max_length=255, blank=True, null=True)
+    departure_date = models.DateField(blank=True, null=True)
+    return_date = models.DateField(blank=True, null=True)
+    passengers = models.IntegerField(blank=True, null=True)
+    budget = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    trip_preferences = models.JSONField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "planner_sessions"
+
+
+class PlannerMessages(models.Model):
+    message_id = models.BigAutoField(primary_key=True)
+    session = models.ForeignKey(PlannerSessions, models.CASCADE, related_name="messages")
+    role = models.CharField(max_length=20)
+    content = models.TextField()
+    message_metadata = models.JSONField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "planner_messages"
+        ordering = ["created_at", "message_id"]
+
+
+class ItineraryDrafts(models.Model):
+    draft_id = models.BigAutoField(primary_key=True)
+    session = models.ForeignKey(PlannerSessions, models.CASCADE, related_name="drafts")
+    status = models.CharField(max_length=30, default="draft")
+    title = models.CharField(max_length=255, blank=True, null=True)
+    summary = models.TextField(blank=True, null=True)
+    origin = models.CharField(max_length=255, blank=True, null=True)
+    destination = models.CharField(max_length=255, blank=True, null=True)
+    departure_date = models.DateField(blank=True, null=True)
+    return_date = models.DateField(blank=True, null=True)
+    passengers = models.IntegerField(blank=True, null=True)
+    budget = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    estimated_total = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    selected_flight = models.JSONField(blank=True, null=True)
+    selected_return_flight = models.JSONField(blank=True, null=True)
+    selected_hotel = models.JSONField(blank=True, null=True)
+    selected_car = models.JSONField(blank=True, null=True)
+    flight_options = models.JSONField(blank=True, null=True)
+    return_flight_options = models.JSONField(blank=True, null=True)
+    hotel_options = models.JSONField(blank=True, null=True)
+    car_options = models.JSONField(blank=True, null=True)
+    ai_metadata = models.JSONField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "itinerary_drafts"

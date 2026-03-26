@@ -1,5 +1,16 @@
 from rest_framework import serializers
-from .models import Flights, Hotels, Cars, Bookings, Countries, Customers, Payments
+from .models import (
+    Flights,
+    Hotels,
+    Cars,
+    Bookings,
+    Countries,
+    Customers,
+    Payments,
+    PlannerSessions,
+    PlannerMessages,
+    ItineraryDrafts,
+)
 
 
 class FlightSerializer(serializers.ModelSerializer):
@@ -201,4 +212,94 @@ class PaymentSerializer(serializers.ModelSerializer):
             "payment_status",
             "transaction_id",
             "paid_at",
+        ]
+
+
+class PlannerMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlannerMessages
+        fields = [
+            "message_id",
+            "session",
+            "role",
+            "content",
+            "message_metadata",
+            "created_at",
+        ]
+
+
+class ItineraryDraftSerializer(serializers.ModelSerializer):
+    estimated_total = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=True,
+        required=False,
+        allow_null=True,
+    )
+    budget = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=True,
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = ItineraryDrafts
+        fields = [
+            "draft_id",
+            "session",
+            "status",
+            "title",
+            "summary",
+            "origin",
+            "destination",
+            "departure_date",
+            "return_date",
+            "passengers",
+            "budget",
+            "estimated_total",
+            "selected_flight",
+            "selected_return_flight",
+            "selected_hotel",
+            "selected_car",
+            "flight_options",
+            "return_flight_options",
+            "hotel_options",
+            "car_options",
+            "ai_metadata",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class PlannerSessionSerializer(serializers.ModelSerializer):
+    budget = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=True,
+        required=False,
+        allow_null=True,
+    )
+    messages = PlannerMessageSerializer(many=True, read_only=True)
+    drafts = ItineraryDraftSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PlannerSessions
+        fields = [
+            "session_id",
+            "customer_id",
+            "title",
+            "status",
+            "origin",
+            "destination",
+            "departure_date",
+            "return_date",
+            "passengers",
+            "budget",
+            "trip_preferences",
+            "created_at",
+            "updated_at",
+            "messages",
+            "drafts",
         ]
