@@ -1,0 +1,26 @@
+# ── Web framework ──────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# ── AI / LLM ───────────────────────────────────────────────────
+openai>=1.75.0
+openai-agents>=0.0.12          # OpenAI Agents SDK
+litellm>=1.40.0                # unified LLM interface (gpt-4.1-nano etc.)
+
+# ── RAG / Vector store ─────────────────────────────────────────
+chromadb>=0.5.0
+
+# ── Data / validation ──────────────────────────────────────────
+pydantic>=2.7.0
+pydantic[email]
+python-dotenv>=1.0.0
+tenacity>=8.3.0
+tqdm>=4.66.0
+
+# ── (Optional) LangChain simple pipeline ──────────────────────
+# langchain>=0.2.0
+# langchain-community>=0.2.0
+# langchain-openai>=0.1.0
+# langchain-chroma>=0.1.0
+# langchain-text-splitters>=0.2.0
