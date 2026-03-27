@@ -107,7 +107,16 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
-CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "true").lower() == "true"
+CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "false").lower() == "true"
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
+    ).split(",")
+    if origin.strip()
+]
+CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 AI_VECTOR_DB_PATH = os.getenv("AI_VECTOR_DB_PATH", str(BASE_DIR / "vector_db_large"))
@@ -127,3 +136,14 @@ CAR_PROVIDER_BASE_URL = os.getenv("CAR_PROVIDER_BASE_URL", "")
 
 PROVIDER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("PROVIDER_REQUEST_TIMEOUT_SECONDS", "15"))
 ENABLE_MOCK_PROVIDERS = os.getenv("ENABLE_MOCK_PROVIDERS", "true").lower() == "true"
+FLIGHT_SEARCH_CACHE_TTL_SECONDS = int(os.getenv("FLIGHT_SEARCH_CACHE_TTL_SECONDS", "300"))
+HOTEL_SEARCH_CACHE_TTL_SECONDS = int(os.getenv("HOTEL_SEARCH_CACHE_TTL_SECONDS", "1800"))
+CAR_SEARCH_CACHE_TTL_SECONDS = int(os.getenv("CAR_SEARCH_CACHE_TTL_SECONDS", "1800"))
+PROVIDER_SYNC_QUERIES_JSON = os.getenv("PROVIDER_SYNC_QUERIES_JSON", "")
+
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@skybook.test").strip().lower()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123")
+ADMIN_NAME = os.getenv("ADMIN_NAME", "SkyBook Admin").strip()
+ADMIN_TOKEN_TTL_SECONDS = int(os.getenv("ADMIN_TOKEN_TTL_SECONDS", "28800"))
+ADMIN_MAX_FAILED_ATTEMPTS = int(os.getenv("ADMIN_MAX_FAILED_ATTEMPTS", "5"))
+ADMIN_LOCKOUT_MINUTES = int(os.getenv("ADMIN_LOCKOUT_MINUTES", "15"))

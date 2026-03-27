@@ -1,16 +1,37 @@
 from datetime import timedelta
 from decimal import Decimal
 import re
-from django.utils import timezone
 from django.contrib.auth.hashers import check_password, make_password
-from django.db.models import Q, Sum
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import Airports, Flights, Hotels, Cars, Bookings, Countries, Customers, PlannerSessions, ItineraryDrafts
+from .admin_security import (
+    authenticate_admin,
+    ensure_default_admin_setup,
+    has_permission,
+    issue_admin_token,
+    log_admin_event,
+    require_admin,
+    serialize_admin_user,
+    serialize_role,
+)
+from .models import (
+    AdminRoles,
+    Airports,
+    Flights,
+    Hotels,
+    Cars,
+    Bookings,
+    Countries,
+    Customers,
+    PlannerSessions,
+    ItineraryDrafts,
+)
 from django.conf import settings
 from .services.health_service import build_health_report
+from .services.inventory_service import InventoryService
 from .services.planner_service import PlannerService
 from .serializers import (
     FlightSerializer,
@@ -419,40 +440,20 @@ def search_flights(request):
     seat_class = (request.data.get("seat_class") or "").strip()
     airline = (request.data.get("airline") or "").strip()
     min_seats = parse_int_value(request.data.get("min_seats"))
+    force_refresh = parse_bool_value(request.data.get("refresh")) is True
 
-    queryset = Flights.objects.select_related("departure_airport", "arrival_airport").all()
-
-    if origin:
-        queryset = queryset.filter(
-            Q(departure_airport__city__icontains=origin)
-            | Q(departure_airport__city_code__icontains=origin)
-            | Q(departure_airport__airport_name__icontains=origin)
-        )
-    if destination:
-        queryset = queryset.filter(
-            Q(arrival_airport__city__icontains=destination)
-            | Q(arrival_airport__city_code__icontains=destination)
-            | Q(arrival_airport__airport_name__icontains=destination)
-        )
-    if airline and airline.lower() != "any":
-        queryset = queryset.filter(airline__icontains=airline)
-    if min_seats:
-        queryset = queryset.filter(available_seats__gte=min_seats)
-
-    flights = []
-    for flight in queryset.order_by("base_price", "departure_time")[:8]:
-        serialized = FlightSerializer(flight).data
-        base_price = Decimal(str(serialized.get("price") or flight.base_price or 0))
-        multiplier = Decimal("1.65") if seat_class.lower() == "business" else Decimal("1.00")
-        serialized["price_economy"] = f"{base_price.quantize(Decimal('0.01'))}"
-        serialized["price_business"] = f"{(base_price * Decimal('1.65')).quantize(Decimal('0.01'))}"
-        serialized["display_price"] = f"{(base_price * multiplier).quantize(Decimal('0.01'))}"
-        serialized["aircraft"] = flight.flight_class or "Boeing 787"
-        serialized["amenities"] = ["WiFi", "Meals", "Entertainment"]
-        serialized["rating"] = 4.7
-        flights.append(serialized)
-
-    return Response(flights)
+    inventory_service = InventoryService()
+    flights = inventory_service.search_flights(
+        origin=origin,
+        destination=destination,
+        passengers=min_seats or 1,
+        preferences={
+            "seat_class": seat_class or "Economy",
+            "airline": airline,
+        },
+        force_refresh=force_refresh,
+    )
+    return Response(flights[:8])
 
 
 @api_view(["POST"])
@@ -461,29 +462,19 @@ def search_hotels(request):
     hotel_style = (request.data.get("hotel_style") or "").strip().lower()
     hotel_amenities = request.data.get("hotel_amenities") or []
     hotel_rating = (request.data.get("hotel_rating") or "").strip().lower()
-    queryset = Hotels.objects.select_related("country").all()
+    force_refresh = parse_bool_value(request.data.get("refresh")) is True
 
-    if city:
-        queryset = queryset.filter(city__icontains=city)
-    for hotel_amenity in hotel_amenities:
-        amenity_value = str(hotel_amenity or "").strip()
-        if amenity_value:
-            queryset = queryset.filter(amenities__icontains=amenity_value)
-    queryset = apply_hotel_rating_filter(queryset, hotel_rating)
-    queryset = apply_hotel_style_filter(queryset, hotel_style)
-
-    hotels = []
-    for hotel in queryset.order_by("price_per_night", "-rating")[:8]:
-        serialized = HotelSerializer(hotel).data
-        serialized["amenity_list"] = split_text_list(hotel.amenities) or [
-            "Breakfast",
-            "WiFi",
-            "Pool",
-            "Airport transfer",
-        ]
-        hotels.append(serialized)
-
-    return Response(hotels)
+    inventory_service = InventoryService()
+    hotels = inventory_service.search_hotels(
+        destination=city,
+        preferences={
+            "hotel_style": hotel_style,
+            "hotel_amenities": hotel_amenities,
+            "hotel_rating": hotel_rating,
+        },
+        force_refresh=force_refresh,
+    )
+    return Response(hotels[:8])
 
 
 @api_view(["POST"])
@@ -491,30 +482,23 @@ def search_cars(request):
     city = (request.data.get("city") or "").strip()
     car_type = (request.data.get("car_type") or "").strip()
     min_seats = parse_int_value(request.data.get("min_seats"))
+    force_refresh = parse_bool_value(request.data.get("refresh")) is True
+
+    inventory_service = InventoryService()
+    cars = inventory_service.search_cars(
+        destination=city,
+        passengers=min_seats or 1,
+        preferences={
+            "car_type": car_type,
+        },
+        force_refresh=force_refresh,
+    )
+
     available_only = request.data.get("available_only")
-    queryset = Cars.objects.select_related("country").all()
-
-    if city:
-        queryset = queryset.filter(city__icontains=city)
-    if car_type and car_type.lower() != "any":
-        queryset = queryset.filter(car_type__icontains=car_type)
-    if min_seats:
-        queryset = queryset.filter(car_seats__gte=min_seats)
     if available_only in [True, "true", "True", "1", 1]:
-        queryset = queryset.filter(availability=True)
+        cars = [car for car in cars if car.get("availability", True)]
 
-    cars = []
-    for car in queryset.order_by("price_per_day", "company")[:8]:
-        serialized = CarSerializer(car).data
-        serialized["features"] = split_text_list(car.description) or [
-            "Air Conditioning",
-            "Bluetooth",
-            "Free Cancellation",
-            "Unlimited KM",
-        ]
-        cars.append(serialized)
-
-    return Response(cars)
+    return Response(cars[:8])
 
 
 @api_view(["GET"])
@@ -613,6 +597,359 @@ def login_customer(request):
             "summary": build_customer_summary(customer),
         }
     )
+
+
+@api_view(["POST"])
+def admin_login(request):
+    ensure_default_admin_setup()
+    email = (request.data.get("email") or "").strip().lower()
+    password = request.data.get("password") or ""
+
+    admin_user, error_message = authenticate_admin(email, password, request=request)
+    if error_message:
+        return Response({"message": error_message}, status=status.HTTP_401_UNAUTHORIZED)
+
+    token = issue_admin_token(admin_user)
+    return Response(
+        {
+            "message": "Admin login successful.",
+            "token": token,
+            "admin": serialize_admin_user(admin_user),
+            "permissions": admin_user.role.permissions if admin_user.role else [],
+        }
+    )
+
+
+@api_view(["GET"])
+def admin_session(request):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request)
+    if error_response:
+        return error_response
+    return Response(
+        {
+            "admin": serialize_admin_user(admin_user),
+            "permissions": admin_user.role.permissions if admin_user.role else [],
+        }
+    )
+
+
+@api_view(["GET"])
+def admin_dashboard(request):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request, permission="dashboard.read")
+    if error_response:
+        return error_response
+
+    bookings_queryset = Bookings.objects.select_related("customer", "hotel", "flight")
+    total_bookings = bookings_queryset.count()
+    active_users = Customers.objects.count()
+    total_revenue = bookings_queryset.aggregate(total=Sum("total_price")).get("total") or Decimal("0")
+    active_listings = Flights.objects.count() + Hotels.objects.count() + Cars.objects.count()
+    bundle_bookings = bookings_queryset.filter(is_bundle=True).count()
+    upcoming_bookings = bookings_queryset.filter(return_date__gte=timezone.now().date()).count()
+    status_counts = {
+        item["booking_status"] or "Unknown": item["count"]
+        for item in bookings_queryset.values("booking_status").annotate(count=Count("booking_id")).order_by("-count")
+    }
+
+    return Response(
+        {
+            "admin": serialize_admin_user(admin_user),
+            "metrics": {
+                "total_bookings": total_bookings,
+                "active_users": active_users,
+                "total_revenue": f"{Decimal(total_revenue):.2f}",
+                "active_listings": active_listings,
+                "bundle_bookings": bundle_bookings,
+                "upcoming_bookings": upcoming_bookings,
+            },
+            "booking_status_breakdown": status_counts,
+        }
+    )
+
+
+@api_view(["GET"])
+def admin_bookings(request):
+    ensure_default_admin_setup()
+    _, error_response = require_admin(request, permission="bookings.read")
+    if error_response:
+        return error_response
+
+    queryset = Bookings.objects.select_related(
+        "customer",
+        "flight",
+        "return_flight",
+        "hotel",
+        "car",
+        "flight__departure_airport",
+        "flight__arrival_airport",
+        "return_flight__departure_airport",
+        "return_flight__arrival_airport",
+        "hotel__country",
+        "car__country",
+    ).order_by("-created_at", "-booking_id")
+
+    status_filter = (request.GET.get("status") or "").strip()
+    if status_filter:
+        queryset = queryset.filter(booking_status__iexact=status_filter)
+
+    return Response(BookingSerializer(queryset, many=True).data)
+
+
+@api_view(["PATCH"])
+def admin_booking_status(request, booking_id):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request)
+    if error_response:
+        return error_response
+
+    action = (request.data.get("action") or "").strip().lower()
+    required_permission = "bookings.cancel" if action == "cancel" else "bookings.refund" if action == "refund" else None
+    if required_permission is None:
+        return Response({"message": "Unsupported booking action."}, status=status.HTTP_400_BAD_REQUEST)
+    if not has_permission(admin_user, required_permission):
+        return Response({"message": "Insufficient permissions for this action."}, status=status.HTTP_403_FORBIDDEN)
+
+    booking = Bookings.objects.filter(pk=booking_id).first()
+    if booking is None:
+        return Response({"message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    previous_status = booking.booking_status
+    booking.booking_status = "Refunded" if action == "refund" else "Cancelled"
+    booking.save(update_fields=["booking_status"])
+    log_admin_event(
+        action=f"booking_{action}",
+        resource_type="booking",
+        resource_id=booking.booking_id,
+        admin_user=admin_user,
+        details={"previous_status": previous_status, "new_status": booking.booking_status},
+        request=request,
+    )
+
+    booking = Bookings.objects.select_related(
+        "customer",
+        "flight",
+        "return_flight",
+        "hotel",
+        "car",
+        "flight__departure_airport",
+        "flight__arrival_airport",
+        "return_flight__departure_airport",
+        "return_flight__arrival_airport",
+        "hotel__country",
+        "car__country",
+    ).get(pk=booking.pk)
+    return Response(BookingSerializer(booking).data)
+
+
+@api_view(["GET"])
+def admin_roles(request):
+    ensure_default_admin_setup()
+    _, error_response = require_admin(request)
+    if error_response:
+        return error_response
+
+    roles = AdminRoles.objects.all().order_by("name")
+    return Response([serialize_role(role) for role in roles])
+
+
+@api_view(["GET", "POST"])
+def admin_flights(request):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request, permission="flights.read" if request.method == "GET" else "flights.write")
+    if error_response:
+        return error_response
+
+    if request.method == "GET":
+        queryset = Flights.objects.select_related("departure_airport", "arrival_airport").order_by("departure_time", "flight_id")
+        return Response(FlightSerializer(queryset, many=True).data)
+
+    serializer = FlightSerializer(data=build_flight_payload(request.data))
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    flight = serializer.save()
+    log_admin_event(
+        action="flight_create",
+        resource_type="flight",
+        resource_id=flight.flight_id,
+        admin_user=admin_user,
+        details={"after": serializer.data},
+        request=request,
+    )
+    return Response(FlightSerializer(flight).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["PUT", "DELETE"])
+def admin_flight_detail(request, flight_id):
+    ensure_default_admin_setup()
+    permission = "flights.write" if request.method == "PUT" else "flights.delete"
+    admin_user, error_response = require_admin(request, permission=permission)
+    if error_response:
+        return error_response
+
+    flight = Flights.objects.filter(pk=flight_id).first()
+    if flight is None:
+        return Response({"message": "Flight not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    before = FlightSerializer(flight).data
+    if request.method == "DELETE":
+        flight.delete()
+        log_admin_event(
+            action="flight_delete",
+            resource_type="flight",
+            resource_id=flight_id,
+            admin_user=admin_user,
+            details={"before": before},
+            request=request,
+        )
+        return Response({"message": "Flight deleted."})
+
+    serializer = FlightSerializer(flight, data=build_flight_payload(request.data))
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    serializer.save()
+    log_admin_event(
+        action="flight_update",
+        resource_type="flight",
+        resource_id=flight_id,
+        admin_user=admin_user,
+        details={"before": before, "after": serializer.data},
+        request=request,
+    )
+    return Response(serializer.data)
+
+
+@api_view(["GET", "POST"])
+def admin_hotels(request):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request, permission="hotels.read" if request.method == "GET" else "hotels.write")
+    if error_response:
+        return error_response
+
+    if request.method == "GET":
+        queryset = Hotels.objects.select_related("country").order_by("city", "hotel_name")
+        return Response(HotelSerializer(queryset, many=True).data)
+
+    serializer = HotelSerializer(data=build_hotel_payload(request.data))
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    hotel = serializer.save()
+    log_admin_event(
+        action="hotel_create",
+        resource_type="hotel",
+        resource_id=hotel.hotel_id,
+        admin_user=admin_user,
+        details={"after": serializer.data},
+        request=request,
+    )
+    return Response(HotelSerializer(hotel).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["PUT", "DELETE"])
+def admin_hotel_detail(request, hotel_id):
+    ensure_default_admin_setup()
+    permission = "hotels.write" if request.method == "PUT" else "hotels.delete"
+    admin_user, error_response = require_admin(request, permission=permission)
+    if error_response:
+        return error_response
+
+    hotel = Hotels.objects.filter(pk=hotel_id).first()
+    if hotel is None:
+        return Response({"message": "Hotel not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    before = HotelSerializer(hotel).data
+    if request.method == "DELETE":
+        hotel.delete()
+        log_admin_event(
+            action="hotel_delete",
+            resource_type="hotel",
+            resource_id=hotel_id,
+            admin_user=admin_user,
+            details={"before": before},
+            request=request,
+        )
+        return Response({"message": "Hotel deleted."})
+
+    serializer = HotelSerializer(hotel, data=build_hotel_payload(request.data))
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    serializer.save()
+    log_admin_event(
+        action="hotel_update",
+        resource_type="hotel",
+        resource_id=hotel_id,
+        admin_user=admin_user,
+        details={"before": before, "after": serializer.data},
+        request=request,
+    )
+    return Response(serializer.data)
+
+
+@api_view(["GET", "POST"])
+def admin_cars(request):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request, permission="cars.read" if request.method == "GET" else "cars.write")
+    if error_response:
+        return error_response
+
+    if request.method == "GET":
+        queryset = Cars.objects.select_related("country").order_by("city", "company", "car_model")
+        return Response(CarSerializer(queryset, many=True).data)
+
+    serializer = CarSerializer(data=build_car_payload(request.data))
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    car = serializer.save()
+    log_admin_event(
+        action="car_create",
+        resource_type="car",
+        resource_id=car.car_id,
+        admin_user=admin_user,
+        details={"after": serializer.data},
+        request=request,
+    )
+    return Response(CarSerializer(car).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["PUT", "DELETE"])
+def admin_car_detail(request, car_id):
+    ensure_default_admin_setup()
+    permission = "cars.write" if request.method == "PUT" else "cars.delete"
+    admin_user, error_response = require_admin(request, permission=permission)
+    if error_response:
+        return error_response
+
+    car = Cars.objects.filter(pk=car_id).first()
+    if car is None:
+        return Response({"message": "Car not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    before = CarSerializer(car).data
+    if request.method == "DELETE":
+        car.delete()
+        log_admin_event(
+            action="car_delete",
+            resource_type="car",
+            resource_id=car_id,
+            admin_user=admin_user,
+            details={"before": before},
+            request=request,
+        )
+        return Response({"message": "Car deleted."})
+
+    serializer = CarSerializer(car, data=build_car_payload(request.data))
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    serializer.save()
+    log_admin_event(
+        action="car_update",
+        resource_type="car",
+        resource_id=car_id,
+        admin_user=admin_user,
+        details={"before": before, "after": serializer.data},
+        request=request,
+    )
+    return Response(serializer.data)
 
 
 @api_view(["GET", "PUT"])
@@ -759,6 +1096,68 @@ def parse_int_value(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def parse_float_value(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_bool_value(value):
+    if isinstance(value, bool):
+        return value
+    if value in ["true", "True", "1", 1]:
+        return True
+    if value in ["false", "False", "0", 0]:
+        return False
+    return None
+
+
+def build_flight_payload(data):
+    return {
+        "flight_number": (data.get("flight_number") or "").strip() or None,
+        "airline": (data.get("airline") or "").strip() or None,
+        "departure_airport": parse_int_value(data.get("departure_airport")),
+        "arrival_airport": parse_int_value(data.get("arrival_airport")),
+        "departure_time": data.get("departure_time") or None,
+        "arrival_time": data.get("arrival_time") or None,
+        "base_price": data.get("base_price") or None,
+        "available_seats": parse_int_value(data.get("available_seats")),
+        "duration_minutes": parse_int_value(data.get("duration_minutes")),
+        "flight_class": (data.get("flight_class") or "").strip() or None,
+        "status": (data.get("status") or "").strip() or None,
+    }
+
+
+def build_hotel_payload(data):
+    return {
+        "hotel_name": (data.get("hotel_name") or "").strip() or None,
+        "city": (data.get("city") or "").strip() or None,
+        "country": parse_int_value(data.get("country")),
+        "price_per_night": data.get("price_per_night") or None,
+        "rating": parse_float_value(data.get("rating")),
+        "description": (data.get("description") or "").strip() or None,
+        "image_url": (data.get("image_url") or "").strip() or None,
+        "amenities": (data.get("amenities") or "").strip() or None,
+        "available_rooms": parse_int_value(data.get("available_rooms")),
+    }
+
+
+def build_car_payload(data):
+    return {
+        "company": (data.get("company") or "").strip() or None,
+        "car_model": (data.get("car_model") or "").strip() or None,
+        "car_type": (data.get("car_type") or "").strip() or None,
+        "city": (data.get("city") or "").strip() or None,
+        "country": parse_int_value(data.get("country")),
+        "price_per_day": data.get("price_per_day") or None,
+        "car_seats": parse_int_value(data.get("car_seats")),
+        "image_url": (data.get("image_url") or "").strip() or None,
+        "availability": parse_bool_value(data.get("availability")),
+        "description": (data.get("description") or "").strip() or None,
+    }
 
 
 @api_view(["GET"])

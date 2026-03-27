@@ -1,8 +1,23 @@
 from django.test import TestCase
 from django.test import override_settings
+from django.contrib.auth.hashers import make_password
 from rest_framework.test import APIClient
 
-from api.models import ItineraryDrafts, PlannerMessages, PlannerSessions
+from api.models import (
+    AdminAuditLogs,
+    AdminRoles,
+    AdminUsers,
+    Airports,
+    Bookings,
+    Cars,
+    Countries,
+    Customers,
+    Flights,
+    Hotels,
+    ItineraryDrafts,
+    PlannerMessages,
+    PlannerSessions,
+)
 
 
 class PlannerWorkflowTests(TestCase):
@@ -137,3 +152,197 @@ class PlannerWorkflowTests(TestCase):
         self.assertIn("providers", payload)
         self.assertIn("checked_at", payload)
         self.assertIn("missing", payload)
+
+
+@override_settings(
+    ADMIN_EMAIL="admin@skybook.test",
+    ADMIN_PASSWORD="Admin@123",
+    ADMIN_NAME="SkyBook Admin",
+    ADMIN_TOKEN_TTL_SECONDS=3600,
+)
+class AdminApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.country = Countries.objects.create(country_name="India", country_code="IN")
+        self.departure_airport = Airports.objects.create(
+            airport_name="Chhatrapati Shivaji Maharaj International Airport",
+            city="Mumbai",
+            city_code="BOM",
+            country=self.country,
+        )
+        self.arrival_airport = Airports.objects.create(
+            airport_name="Dubai International Airport",
+            city="Dubai",
+            city_code="DXB",
+            country=self.country,
+        )
+        self.customer = Customers.objects.create(name="Admin Test User", email="user@example.com")
+        self.flight = Flights.objects.create(
+            flight_number="SB101",
+            airline="SkyBook Air",
+            departure_airport=self.departure_airport,
+            arrival_airport=self.arrival_airport,
+            base_price="299.00",
+            available_seats=12,
+        )
+        self.hotel = Hotels.objects.create(
+            hotel_name="SkyBook Suites",
+            city="Dubai",
+            country=self.country,
+            price_per_night="149.00",
+            rating=4.5,
+            available_rooms=9,
+        )
+        self.car = Cars.objects.create(
+            company="SkyDrive",
+            car_model="Sedan",
+            car_type="Premium",
+            city="Dubai",
+            country=self.country,
+            price_per_day="59.00",
+            car_seats=4,
+            availability=True,
+        )
+        self.booking = Bookings.objects.create(
+            customer=self.customer,
+            flight=self.flight,
+            hotel=self.hotel,
+            car=self.car,
+            outbound_date="2026-04-10",
+            return_date="2026-04-14",
+            total_price="899.00",
+            booking_status="Confirmed",
+            is_bundle=True,
+            passengers=2,
+        )
+
+    def authenticate_admin(self):
+        response = self.client.post(
+            "/api/admin/auth/login/",
+            {"email": "admin@skybook.test", "password": "Admin@123"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["token"]
+
+    def test_admin_login_rejects_invalid_credentials(self):
+        response = self.client.post(
+            "/api/admin/auth/login/",
+            {"email": "admin@skybook.test", "password": "wrong-password"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_admin_dashboard_requires_token(self):
+        response = self.client.get("/api/admin/dashboard/")
+        self.assertEqual(response.status_code, 401)
+
+    def test_admin_endpoints_return_data_for_authenticated_user(self):
+        token = self.authenticate_admin()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        dashboard_response = self.client.get("/api/admin/dashboard/")
+        self.assertEqual(dashboard_response.status_code, 200)
+        self.assertEqual(dashboard_response.json()["metrics"]["total_bookings"], 1)
+
+        bookings_response = self.client.get("/api/admin/bookings/")
+        self.assertEqual(bookings_response.status_code, 200)
+        self.assertEqual(bookings_response.json()[0]["customer_name"], "Admin Test User")
+
+        flights_response = self.client.get("/api/admin/flights/")
+        self.assertEqual(flights_response.status_code, 200)
+        self.assertEqual(flights_response.json()[0]["flight_number"], "SB101")
+
+        hotels_response = self.client.get("/api/admin/hotels/")
+        self.assertEqual(hotels_response.status_code, 200)
+        self.assertEqual(hotels_response.json()[0]["hotel_name"], "SkyBook Suites")
+
+        cars_response = self.client.get("/api/admin/cars/")
+        self.assertEqual(cars_response.status_code, 200)
+        self.assertEqual(cars_response.json()[0]["company"], "SkyDrive")
+
+    def test_inventory_crud_and_booking_refund_are_audited(self):
+        token = self.authenticate_admin()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        refund_response = self.client.patch(
+            f"/api/admin/bookings/{self.booking.booking_id}/status/",
+            {"action": "refund"},
+            format="json",
+        )
+        self.assertEqual(refund_response.status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.booking_status, "Refunded")
+
+        create_flight_response = self.client.post(
+            "/api/admin/flights/",
+            {
+                "flight_number": "SB202",
+                "airline": "SkyBook Air",
+                "departure_airport": self.departure_airport.airport_id,
+                "arrival_airport": self.arrival_airport.airport_id,
+                "departure_time": "2026-05-01T10:00:00Z",
+                "arrival_time": "2026-05-01T14:00:00Z",
+                "base_price": "450.00",
+                "available_seats": 18,
+                "duration_minutes": 240,
+                "flight_class": "Business",
+                "status": "Scheduled",
+            },
+            format="json",
+        )
+        self.assertEqual(create_flight_response.status_code, 201)
+        created_flight_id = create_flight_response.json()["flight_id"]
+
+        delete_flight_response = self.client.delete(f"/api/admin/flights/{created_flight_id}/")
+        self.assertEqual(delete_flight_response.status_code, 200)
+
+        self.assertTrue(AdminAuditLogs.objects.filter(action="booking_refund").exists())
+        self.assertTrue(AdminAuditLogs.objects.filter(action="flight_create").exists())
+        self.assertTrue(AdminAuditLogs.objects.filter(action="flight_delete").exists())
+
+    def test_inventory_admin_cannot_refund_bookings(self):
+        self.authenticate_admin()
+        inventory_role = AdminRoles.objects.get(code="inventory_admin")
+        inventory_admin = AdminUsers.objects.create(
+            role=inventory_role,
+            email="inventory@skybook.test",
+            full_name="Inventory Manager",
+            password_hash=make_password("Inventory@123"),
+            is_active=True,
+        )
+
+        response = self.client.post(
+            "/api/admin/auth/login/",
+            {"email": inventory_admin.email, "password": "Inventory@123"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        token = response.json()["token"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        refund_response = self.client.patch(
+            f"/api/admin/bookings/{self.booking.booking_id}/status/",
+            {"action": "refund"},
+            format="json",
+        )
+        self.assertEqual(refund_response.status_code, 403)
+
+    @override_settings(ADMIN_MAX_FAILED_ATTEMPTS=2, ADMIN_LOCKOUT_MINUTES=10)
+    def test_admin_account_locks_after_failed_attempts(self):
+        self.client.post(
+            "/api/admin/auth/login/",
+            {"email": "admin@skybook.test", "password": "wrong-1"},
+            format="json",
+        )
+        self.client.post(
+            "/api/admin/auth/login/",
+            {"email": "admin@skybook.test", "password": "wrong-2"},
+            format="json",
+        )
+        locked_response = self.client.post(
+            "/api/admin/auth/login/",
+            {"email": "admin@skybook.test", "password": "Admin@123"},
+            format="json",
+        )
+        self.assertEqual(locked_response.status_code, 401)

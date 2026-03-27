@@ -30,6 +30,51 @@ class Countries(models.Model):
         db_table = "countries"
 
 
+class AdminRoles(models.Model):
+    role_id = models.AutoField(primary_key=True)
+    name = models.CharField(unique=True, max_length=100)
+    code = models.CharField(unique=True, max_length=50)
+    permissions = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "admin_roles"
+
+
+class AdminUsers(models.Model):
+    admin_user_id = models.AutoField(primary_key=True)
+    role = models.ForeignKey(AdminRoles, models.DO_NOTHING, related_name="admin_users")
+    email = models.CharField(unique=True, max_length=255)
+    full_name = models.CharField(max_length=255)
+    password_hash = models.TextField()
+    is_active = models.BooleanField(default=True)
+    failed_login_attempts = models.IntegerField(default=0)
+    locked_until = models.DateTimeField(blank=True, null=True)
+    last_login_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "admin_users"
+
+
+class AdminAuditLogs(models.Model):
+    audit_log_id = models.BigAutoField(primary_key=True)
+    admin_user = models.ForeignKey(AdminUsers, models.DO_NOTHING, related_name="audit_logs", blank=True, null=True)
+    role = models.ForeignKey(AdminRoles, models.DO_NOTHING, blank=True, null=True)
+    action = models.CharField(max_length=120)
+    resource_type = models.CharField(max_length=80)
+    resource_id = models.CharField(max_length=80, blank=True, null=True)
+    status = models.CharField(max_length=30, default="success")
+    details = models.JSONField(default=dict, blank=True)
+    ip_address = models.CharField(max_length=64, blank=True, null=True)
+    user_agent = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "admin_audit_logs"
+
+
 class Customers(models.Model):
     customer_id = models.AutoField(primary_key=True)
     name = models.CharField(max_length=255, blank=True, null=True)
@@ -201,3 +246,21 @@ class ItineraryDrafts(models.Model):
 
     class Meta:
         db_table = "itinerary_drafts"
+
+
+class ProviderSearchCache(models.Model):
+    cache_id = models.BigAutoField(primary_key=True)
+    provider_type = models.CharField(max_length=20)
+    cache_key = models.CharField(unique=True, max_length=255)
+    request_signature = models.JSONField(default=dict, blank=True)
+    response_payload = models.JSONField(default=list, blank=True)
+    expires_at = models.DateTimeField()
+    last_refreshed_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "provider_search_cache"
+        indexes = [
+            models.Index(fields=["provider_type", "expires_at"]),
+            models.Index(fields=["cache_key"]),
+        ]

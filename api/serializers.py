@@ -30,7 +30,13 @@ class FlightSerializer(serializers.ModelSerializer):
     code = serializers.SerializerMethodField()
     logo = serializers.SerializerMethodField()
     stops = serializers.SerializerMethodField()
-    price = serializers.DecimalField(source="base_price", max_digits=10, decimal_places=2, coerce_to_string=True)
+    price = serializers.DecimalField(
+        source="base_price",
+        max_digits=10,
+        decimal_places=2,
+        coerce_to_string=True,
+        read_only=True,
+    )
 
     class Meta:
         model = Flights
@@ -145,6 +151,9 @@ class BookingSerializer(serializers.ModelSerializer):
     return_flight_details = FlightSerializer(source="return_flight", read_only=True)
     hotel_details = HotelSerializer(source="hotel", read_only=True)
     car_details = CarSerializer(source="car", read_only=True)
+    customer_details = serializers.SerializerMethodField()
+    customer_name = serializers.SerializerMethodField()
+    customer_email = serializers.SerializerMethodField()
     booking_reference = serializers.SerializerMethodField()
 
     class Meta:
@@ -165,6 +174,9 @@ class BookingSerializer(serializers.ModelSerializer):
             "passengers",
             "seat_class",
             "created_at",
+            "customer_details",
+            "customer_name",
+            "customer_email",
             "flight_details",
             "return_flight_details",
             "hotel_details",
@@ -173,6 +185,17 @@ class BookingSerializer(serializers.ModelSerializer):
 
     def get_booking_reference(self, obj):
         return f"SNA{int(obj.booking_id):06d}"
+
+    def get_customer_details(self, obj):
+        if not obj.customer:
+            return None
+        return CustomerSerializer(obj.customer).data
+
+    def get_customer_name(self, obj):
+        return obj.customer.name if obj.customer else None
+
+    def get_customer_email(self, obj):
+        return obj.customer.email if obj.customer else None
 
 
 class CountrySerializer(serializers.ModelSerializer):

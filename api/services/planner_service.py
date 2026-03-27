@@ -8,12 +8,8 @@ from typing import Any
 from django.utils import timezone
 
 from api.models import ItineraryDrafts, PlannerMessages, PlannerSessions
-from api.services.providers import (
-    ProviderSearchContext,
-    get_car_provider,
-    get_flight_provider,
-    get_hotel_provider,
-)
+from api.services.inventory_service import InventoryService
+from api.services.providers import ProviderSearchContext
 
 
 logger = logging.getLogger(__name__)
@@ -101,9 +97,10 @@ class PlannerService:
     """Planner service boundary for chat and future orchestration."""
 
     def __init__(self):
-        self.flight_provider = get_flight_provider()
-        self.hotel_provider = get_hotel_provider()
-        self.car_provider = get_car_provider()
+        self.inventory_service = InventoryService()
+        self.flight_provider = self.inventory_service.flight_provider
+        self.hotel_provider = self.inventory_service.hotel_provider
+        self.car_provider = self.inventory_service.car_provider
 
     def generate_chat_reply(self, message: str, history: list[dict] | None = None) -> PlannerReply:
         normalized_history = history or []
@@ -182,35 +179,27 @@ class PlannerService:
         if return_date is None:
             return_date = departure_date + timedelta(days=5)
 
-        outbound_flights = self.flight_provider.search(
-            ProviderSearchContext(
-                origin=origin,
-                destination=destination,
-                passengers=passengers,
-                preferences=preferences,
-            )
+        outbound_flights = self.inventory_service.search_flights(
+            origin=origin,
+            destination=destination,
+            passengers=passengers,
+            preferences=preferences,
         )
-        return_flights = self.flight_provider.search(
-            ProviderSearchContext(
-                origin=destination,
-                destination=origin,
-                passengers=passengers,
-                preferences=preferences,
-            )
+        return_flights = self.inventory_service.search_flights(
+            origin=destination,
+            destination=origin,
+            passengers=passengers,
+            preferences=preferences,
         )
-        hotels = self.hotel_provider.search(
-            ProviderSearchContext(
-                destination=destination,
-                passengers=passengers,
-                preferences=preferences,
-            )
+        hotels = self.inventory_service.search_hotels(
+            destination=destination,
+            passengers=passengers,
+            preferences=preferences,
         )
-        cars = self.car_provider.search(
-            ProviderSearchContext(
-                destination=destination,
-                passengers=passengers,
-                preferences=preferences,
-            )
+        cars = self.inventory_service.search_cars(
+            destination=destination,
+            passengers=passengers,
+            preferences=preferences,
         )
 
         selected_flight = outbound_flights[0] if outbound_flights else None

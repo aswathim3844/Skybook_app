@@ -1,18 +1,5 @@
-import AdminPage, { AdminTable } from "@/components/travel/AdminPage";
-import { adminFlights } from "@/lib/mock-data";
+import { redirect } from "next/navigation";
 
 export default function AdminFlightsPage() {
-  return (
-    <AdminPage
-      eyebrow="Admin Flights"
-      title="Manage flights"
-      description="Inventory-style admin table for flight routes, airlines, seat counts, and fares."
-    >
-      <AdminTable
-        title="Flight inventory"
-        columns={["Route", "Airline", "Seats", "Fare"]}
-        rows={adminFlights}
-      />
-    </AdminPage>
-  );
+  redirect(process.env.NEXT_PUBLIC_ADMIN_APP_URL || "http://localhost:3001/flights");
 }

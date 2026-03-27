@@ -1,18 +1,5 @@
-import AdminPage, { AdminTable } from "@/components/travel/AdminPage";
-import { adminBookings } from "@/lib/mock-data";
+import { redirect } from "next/navigation";
 
 export default function AdminBookingsPage() {
-  return (
-    <AdminPage
-      eyebrow="Admin Bookings"
-      title="View bookings"
-      description="Operations table for order status checks and support follow-up."
-    >
-      <AdminTable
-        title="Recent bookings"
-        columns={["Booking ID", "Customer", "Trip", "Status"]}
-        rows={adminBookings}
-      />
-    </AdminPage>
-  );
+  redirect(process.env.NEXT_PUBLIC_ADMIN_APP_URL || "http://localhost:3001/bookings");
 }
