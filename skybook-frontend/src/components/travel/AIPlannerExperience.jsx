@@ -19,9 +19,12 @@ import {
   createPlannerSession,
   fetchAllCars,
   fetchFlightLocations,
+  fetchFlightRoutes,
+  fetchHotelOffer,
   fetchPlannerSessions,
   fetchPlannerSession,
   fetchProviderStatus,
+  enrichPlannerDraft,
   generatePlannerSessionPlan,
   revalidatePlannerDraft,
   retrieveBooking,
@@ -46,7 +49,7 @@ const QUICK_CHIPS = [
   "Best time to visit London?",
   "What currency for Tokyo?",
   "What to pack for a beach trip?",
-  "SkyNest baggage allowance?",
+  "SkyBook baggage allowance?",
   "How do I cancel my booking?",
 ];
 
@@ -71,6 +74,7 @@ export default function AIPlannerExperience() {
   const [showQuickChips, setShowQuickChips] = useState(true);
   const [chatLoading, setChatLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [insightsLoading, setInsightsLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [activeTab, setActiveTab] = useState("flights");
   const [confirmation, setConfirmation] = useState(null);
@@ -86,6 +90,7 @@ export default function AIPlannerExperience() {
   const [providerStatus, setProviderStatus] = useState(null);
   const [sessionHistory, setSessionHistory] = useState([]);
   const [locationOptions, setLocationOptions] = useState([]);
+  const [routeOptions, setRouteOptions] = useState([]);
   const [carTypeOptions, setCarTypeOptions] = useState(["Any"]);
   const [selectedOutboundFlightId, setSelectedOutboundFlightId] = useState(null);
   const [selectedReturnFlightId, setSelectedReturnFlightId] = useState(null);
@@ -96,6 +101,14 @@ export default function AIPlannerExperience() {
     returnFlights: [],
     hotels: [],
     cars: [],
+  });
+  const [plannerInsights, setPlannerInsights] = useState({
+    itinerary: [],
+    visaInfo: "",
+    baggageInfo: "",
+    destinationBrief: "",
+    qualityScore: null,
+    pricing: null,
   });
   const [form, setForm] = useState({
     name: customer?.name || "Traveler",
@@ -131,6 +144,53 @@ export default function AIPlannerExperience() {
         };
       }),
     [locationOptions],
+  );
+  const locationTokensFor = useMemo(
+    () => (location) =>
+      [
+        location?.label,
+        location?.city,
+        location?.city_code,
+        `${location?.city || ""}, ${location?.country || ""}`.replace(/,\s*$/, ""),
+      ]
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter(Boolean),
+    [],
+  );
+  const plannerRouteMap = useMemo(() => {
+    const map = new Map();
+
+    routeOptions.forEach((origin) => {
+      locationTokensFor(origin).forEach((token) => {
+        map.set(token, origin.destinations || []);
+      });
+    });
+
+    return map;
+  }, [locationTokensFor, routeOptions]);
+  const destinationLocationOptions = useMemo(() => {
+    const origin = String(form.origin || "").trim().toLowerCase();
+    const routeDestinations = getPlannerDestinationOptionsForValue(
+      form.origin,
+      plannerRouteMap,
+      locationOptions,
+      locationTokensFor,
+    );
+    const baseOptions = routeDestinations.length > 0 ? routeDestinations : locationOptions;
+
+    if (!origin) {
+      return baseOptions;
+    }
+
+    return baseOptions.filter((location) => !locationTokensFor(location).includes(origin));
+  }, [form.origin, locationOptions, locationTokensFor, plannerRouteMap]);
+  const plannerDestinationOptions = useMemo(
+    () =>
+      destinationLocationOptions.map((location) => ({
+        value: formatLocationLabel(location),
+        label: formatLocationLabel(location),
+      })),
+    [destinationLocationOptions],
   );
 
   useEffect(() => {
@@ -185,6 +245,75 @@ export default function AIPlannerExperience() {
   useEffect(() => {
     let active = true;
 
+    async function enrichPlannerHotels() {
+      if (!results.hotels.length || !form.departureDate || !form.returnDate) {
+        return;
+      }
+
+      const needsPricing = results.hotels.some(
+        (hotel) =>
+          !hotel.offer_enriched &&
+          (Boolean(hotel.pricing_pending || hotel.is_discovery_result) || getHotelNightlyRate(hotel) <= 0),
+      );
+
+      if (!needsPricing) {
+        return;
+      }
+
+      const candidates = results.hotels.slice(0, 3);
+      const pricedHotels = await Promise.all(
+        candidates.map(async (hotel) => {
+          try {
+            const offer = await fetchHotelOffer({
+              hotel,
+              city: form.destination,
+              checkin_date: form.departureDate,
+              checkout_date: form.returnDate,
+              adults_number: Number(form.passengers || 1),
+            });
+
+            return {
+              ...hotel,
+              ...offer,
+              offer_enriched: true,
+              price_per_night:
+                offer.price_per_night ||
+                offer.price_confirmed ||
+                hotel.price_per_night ||
+                hotel.price ||
+                "0",
+              pricing_pending: Boolean(offer.pricing_pending),
+              is_discovery_result: false,
+              offer_lookup_required: false,
+              price_display: offer.price_display || hotel.price_display || null,
+              description: offer.offer_message || hotel.description,
+            };
+          } catch {
+            return { ...hotel, offer_enriched: true };
+          }
+        }),
+      );
+
+      if (!active) {
+        return;
+      }
+
+      setResults((current) => ({
+        ...current,
+        hotels: [...pricedHotels, ...current.hotels.slice(candidates.length)],
+      }));
+    }
+
+    void enrichPlannerHotels();
+
+    return () => {
+      active = false;
+    };
+  }, [results.hotels, form.departureDate, form.returnDate, form.destination, form.passengers]);
+
+  useEffect(() => {
+    let active = true;
+
     async function loadSessionHistory() {
       try {
         const sessions = await fetchPlannerSessions(customer?.customer_id || null);
@@ -210,22 +339,37 @@ export default function AIPlannerExperience() {
 
     async function loadLocations() {
       try {
-        const locations = await fetchFlightLocations();
+        const [locations, routes] = await Promise.all([
+          fetchFlightLocations(),
+          fetchFlightRoutes().catch(() => []),
+        ]);
         if (!active) {
           return;
         }
 
         const nextLocations = Array.isArray(locations) ? locations : [];
+        const nextRoutes = Array.isArray(routes) ? routes : [];
         setLocationOptions(nextLocations);
+        setRouteOptions(nextRoutes);
 
         if (nextLocations.length > 0) {
           const firstOrigin =
             nextLocations.find((location) => location.city === "Mumbai") ||
             nextLocations[0];
+          const originRouteDestinations = getPlannerDestinationOptionsForValue(
+            formatLocationLabel(firstOrigin),
+            buildPlannerRouteMap(nextRoutes, locationTokensFor),
+            nextLocations,
+            locationTokensFor,
+          );
+          const destinationPool = originRouteDestinations.length > 0 ? originRouteDestinations : nextLocations;
           const firstDestination =
-            nextLocations.find((location) => location.city === "London") ||
-            nextLocations[Math.min(1, nextLocations.length - 1)] ||
-            nextLocations[0];
+            destinationPool.find((location) => location.city === "London") ||
+            destinationPool.find(
+              (location) =>
+                formatLocationLabel(location).toLowerCase() !== formatLocationLabel(firstOrigin).toLowerCase(),
+            ) ||
+            destinationPool[0];
 
           setForm((current) => ({
             ...current,
@@ -246,6 +390,38 @@ export default function AIPlannerExperience() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      form.departureDate &&
+      form.returnDate &&
+      form.returnDate < form.departureDate
+    ) {
+      setForm((current) => ({
+        ...current,
+        returnDate: current.departureDate,
+      }));
+    }
+  }, [form.departureDate, form.returnDate]);
+
+  useEffect(() => {
+    if (!form.origin) {
+      return;
+    }
+
+    if (
+      form.destination &&
+      plannerDestinationOptions.length > 0 &&
+      !plannerDestinationOptions.some(
+        (location) => location.value.toLowerCase() === String(form.destination).trim().toLowerCase(),
+      )
+    ) {
+      setForm((current) => ({
+        ...current,
+        destination: plannerDestinationOptions[0]?.value || "",
+      }));
+    }
+  }, [form.destination, form.origin, plannerDestinationOptions]);
 
   useEffect(() => {
     let active = true;
@@ -358,13 +534,14 @@ export default function AIPlannerExperience() {
         ...current,
         { role: "assistant", content: response.reply },
       ]);
-    } catch {
+    } catch (error) {
       setMessages((current) => [
         ...current,
         {
           role: "assistant",
           content:
-            "AI Planner is starting up... please wait a moment and try again.",
+            errorToMessage(error) ||
+            "AI Planner could not answer that right now. Please try again.",
         },
       ]);
     } finally {
@@ -389,6 +566,7 @@ export default function AIPlannerExperience() {
         return_date: activeForm.returnDate,
         passengers: activeForm.passengers,
         budget: activeForm.budget,
+        include_insights: false,
         preferences: {
           trip_type: activeForm.tripType,
           seat_class: activeForm.seatClass,
@@ -419,9 +597,18 @@ export default function AIPlannerExperience() {
           : [];
       const hotels = Array.isArray(draft.hotel_options) ? draft.hotel_options : [];
       const cars = Array.isArray(draft.car_options) ? draft.car_options : [];
+      const metadata = draft.ai_metadata || {};
 
       setCurrentDraftId(draft.draft_id);
       setResults({ outbound, returnFlights, hotels, cars });
+      setPlannerInsights({
+        itinerary: Array.isArray(metadata.itinerary) ? metadata.itinerary : [],
+        visaInfo: metadata.visa_info || "",
+        baggageInfo: metadata.baggage_info || "",
+        destinationBrief: metadata.destination_brief || "",
+        qualityScore: metadata.quality_score || null,
+        pricing: metadata.pricing || null,
+      });
       setSelectedOutboundFlightId(draft.selected_flight?.flight_id || outbound[0]?.flight_id || null);
       setSelectedReturnFlightId(
         draft.selected_return_flight?.flight_id || returnFlights[0]?.flight_id || null,
@@ -434,10 +621,10 @@ export default function AIPlannerExperience() {
           "No results found yet. Try different dates, a different destination, or a higher budget.",
         );
       }
-    } catch {
-      setSearchError(
-        "AI Planner is starting up... please wait a moment and try again.",
-      );
+
+      void loadPlannerInsights(sessionId, draft.draft_id);
+    } catch (error) {
+      setSearchError(errorToMessage(error) || "AI Planner could not complete the search right now.");
     } finally {
       setSearching(false);
     }
@@ -476,6 +663,14 @@ export default function AIPlannerExperience() {
         return_flight: numericOrNull(selectedReturnFlight?.flight_id),
         hotel: numericOrNull(selectedHotel.hotel_id),
         car: numericOrNull(selectedCar.car_id),
+        booking_metadata: {
+          selected_flight: selectedFlight || null,
+          selected_return_flight: selectedReturnFlight || null,
+          selected_hotel: selectedHotel || null,
+          selected_car: selectedCar || null,
+          planner_session_id: plannerSessionId,
+          planner_draft_id: currentDraftId,
+        },
         check_in: form.departureDate,
         check_out: form.returnDate,
         nights,
@@ -485,11 +680,12 @@ export default function AIPlannerExperience() {
       });
 
       setConfirmation(response);
+      setLookupReference(response.booking_reference || "");
+      setLookupResult(response);
+      setLookupError("");
       persistPlannerLoyalty(response, pricing.grandTotal);
-    } catch {
-      setSearchError(
-        "We could not revalidate the current package. Please run the planner again and retry booking.",
-      );
+    } catch (error) {
+      setSearchError(errorToMessage(error) || "We could not revalidate the current package. Please run the planner again and retry booking.");
     } finally {
       setConfirmingBooking(false);
     }
@@ -504,11 +700,34 @@ export default function AIPlannerExperience() {
     try {
       const result = await retrieveBooking(lookupReference.trim().toUpperCase());
       setLookupResult(result);
+      setLookupError("");
     } catch {
       setLookupResult(null);
-      setLookupError("Booking not found - check your reference");
+      setLookupError("Booking not found. Use a reference like SNA000123.");
     } finally {
       setLookupLoading(false);
+    }
+  }
+
+  async function loadPlannerInsights(sessionId, draftId) {
+    setInsightsLoading(true);
+
+    try {
+      const draft = await enrichPlannerDraft(sessionId, draftId);
+      const metadata = draft.ai_metadata || {};
+
+      setPlannerInsights({
+        itinerary: Array.isArray(metadata.itinerary) ? metadata.itinerary : [],
+        visaInfo: metadata.visa_info || "",
+        baggageInfo: metadata.baggage_info || "",
+        destinationBrief: metadata.destination_brief || "",
+        qualityScore: metadata.quality_score || null,
+        pricing: metadata.pricing || null,
+      });
+    } catch {
+      // Keep the fast draft visible; insights can fail independently.
+    } finally {
+      setInsightsLoading(false);
     }
   }
 
@@ -552,8 +771,17 @@ export default function AIPlannerExperience() {
             : [];
         const hotels = Array.isArray(latestDraft.hotel_options) ? latestDraft.hotel_options : [];
         const cars = Array.isArray(latestDraft.car_options) ? latestDraft.car_options : [];
+        const metadata = latestDraft.ai_metadata || {};
 
         setResults({ outbound, returnFlights, hotels, cars });
+        setPlannerInsights({
+          itinerary: Array.isArray(metadata.itinerary) ? metadata.itinerary : [],
+          visaInfo: metadata.visa_info || "",
+          baggageInfo: metadata.baggage_info || "",
+          destinationBrief: metadata.destination_brief || "",
+          qualityScore: metadata.quality_score || null,
+          pricing: metadata.pricing || null,
+        });
         setSelectedOutboundFlightId(latestDraft.selected_flight?.flight_id || outbound[0]?.flight_id || null);
         setSelectedReturnFlightId(
           latestDraft.selected_return_flight?.flight_id || returnFlights[0]?.flight_id || null,
@@ -567,24 +795,24 @@ export default function AIPlannerExperience() {
   }
 
   return (
-    <div className="space-y-10 pb-28 xl:pr-[24rem]">
+    <div className={`mx-auto max-w-[1680px] space-y-12 pb-28 ${chatOpen ? "2xl:pr-[26rem]" : ""}`}>
       <section>
         <section className="w-full rounded-[36px] border border-slate-200 bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.1)] sm:p-8">
-          <div className="flex items-start justify-between gap-4">
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_180px] xl:items-start">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
                 Plan Your Trip with AI
               </p>
-              <h2 className="mt-3 text-3xl font-semibold text-slate-900">
+              <h2 className="mt-3 max-w-3xl text-4xl font-semibold leading-tight text-slate-900">
                 Build the trip here
               </h2>
-              <p className="mt-3 text-sm leading-7 text-slate-600">
+              <p className="mt-4 max-w-3xl text-base leading-8 text-slate-600">
                 Our AI searches flights, hotels and cars together, then surfaces
                 the strongest bundle for your route, budget, and trip style.
               </p>
             </div>
             {providerStatus ? (
-              <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3 text-right">
+              <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4 text-right xl:mt-2">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
                   Runtime Mode
                 </p>
@@ -605,7 +833,7 @@ export default function AIPlannerExperience() {
 
           </div>
 
-          <div className="mt-8 grid gap-5 md:grid-cols-2">
+          <div className="mt-10 grid gap-6 md:grid-cols-2">
             <FormField label="Flying From">
               <select
                 value={form.origin}
@@ -636,10 +864,10 @@ export default function AIPlannerExperience() {
                 }
                 className={inputClassName}
               >
-                {plannerLocationOptions.length === 0 ? (
+                {plannerDestinationOptions.length === 0 ? (
                   <option value="">Loading locations...</option>
                 ) : null}
-                {plannerLocationOptions.map((location) => (
+                {plannerDestinationOptions.map((location) => (
                   <option key={location.value} value={location.value}>
                     {location.label}
                   </option>
@@ -728,7 +956,7 @@ export default function AIPlannerExperience() {
             </FormField>
           </div>
 
-          <div className="mt-5">
+          <div className="mt-6">
             <FormField label="Total Budget">
               <div className="rounded-[24px] border border-slate-200 bg-slate-50 p-5">
                 <input
@@ -759,7 +987,7 @@ export default function AIPlannerExperience() {
             </FormField>
           </div>
 
-          <div className="mt-5">
+          <div className="mt-6">
             <FormField label="Trip Type">
               <select
                 value={form.tripType}
@@ -777,7 +1005,7 @@ export default function AIPlannerExperience() {
             </FormField>
           </div>
 
-          <div className="mt-5 grid gap-5 md:grid-cols-2">
+          <div className="mt-6 grid gap-6 md:grid-cols-2">
             <FormField label="Hotel Style">
               <select
                 value={form.hotelStyle}
@@ -873,7 +1101,7 @@ export default function AIPlannerExperience() {
 
           </div>
 
-          <div className="mt-8 rounded-[28px] border border-[#173a7a]/10 bg-[linear-gradient(135deg,rgba(23,58,122,0.05),rgba(249,115,22,0.08))] p-5">
+          <div className="mt-10 rounded-[28px] border border-[#173a7a]/10 bg-[linear-gradient(135deg,rgba(23,58,122,0.05),rgba(249,115,22,0.08))] p-6">
             <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.18em] text-[#173a7a]">
@@ -901,14 +1129,14 @@ export default function AIPlannerExperience() {
         </section>
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-[1.22fr_0.78fr]">
-        <section className="order-2 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm lg:order-2">
+      <section className="grid gap-8 xl:grid-cols-[minmax(0,1.58fr)_360px]">
+        <section className="order-2 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm xl:order-2 xl:sticky xl:top-6 xl:self-start">
           {sessionHistory.length > 0 ? (
-            <div className="mb-6 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+            <div className="mb-6 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
                 Recent Planner Sessions
               </p>
-              <div className="mt-3 space-y-2">
+              <div className="mt-4 space-y-3">
                 {sessionHistory.slice(0, 3).map((session) => (
                   <button
                     key={session.session_id}
@@ -940,7 +1168,7 @@ export default function AIPlannerExperience() {
           <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
             Booking Summary
           </p>
-          <h2 className="mt-3 text-2xl font-semibold text-slate-900">
+          <h2 className="mt-3 text-[2rem] font-semibold leading-tight text-slate-900">
             Book Your AI-Recommended Package
           </h2>
           <div className="mt-6 space-y-4">
@@ -961,7 +1189,7 @@ export default function AIPlannerExperience() {
                   ? `Hotel: ${selectedHotel.hotel_name} · ${
                       Math.round(Number(selectedHotel.rating || 0)) || 4
                     } stars · ${formatCurrency(
-                      Number(selectedHotel.price_per_night || 0),
+                      getHotelNightlyRate(selectedHotel),
                     )}/night`
                   : `Hotel: ${form.hotelStyle} stay with ${form.hotelAmenities.join(", ").toLowerCase()} preferences`
               }
@@ -978,7 +1206,7 @@ export default function AIPlannerExperience() {
             />
           </div>
 
-          <div className="mt-6 rounded-[24px] bg-slate-50 p-5">
+          <div className="mt-7 rounded-[24px] bg-slate-50 p-5">
             <p className="text-sm text-slate-500">Grand Total</p>
             <p className="mt-2 text-3xl font-semibold text-slate-900">
               {formatCurrency(pricing.grandTotal)}
@@ -997,7 +1225,7 @@ export default function AIPlannerExperience() {
           </button>
 
           {revalidationState ? (
-            <div className="mt-4 rounded-[24px] border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            <div className="mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
               <p className="font-semibold text-slate-900">Latest Revalidation</p>
               <p className="mt-2">
                 Flight: {formatRevalidationStatus(revalidationState.flight)}
@@ -1025,33 +1253,69 @@ export default function AIPlannerExperience() {
                     {confirmation.booking_reference}
                   </p>
                   <p className="mt-2 text-sm text-emerald-700">
-                    Save this reference - you can retrieve your booking anytime
+                    Saved to the database. You can verify it below with the same reference.
                   </p>
                   <p className="mt-2 text-sm font-medium text-emerald-700">
                     +{Math.round(pricing.grandTotal).toLocaleString()} miles added
                     to your account
                   </p>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-[20px] border border-emerald-200 bg-white/70 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                        Status
+                      </p>
+                      <p className="mt-2 text-sm font-semibold text-emerald-900">
+                        {confirmation.booking_status || "Confirmed"}
+                      </p>
+                    </div>
+                    <div className="rounded-[20px] border border-emerald-200 bg-white/70 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                        Total Saved
+                      </p>
+                      <p className="mt-2 text-sm font-semibold text-emerald-900">
+                        {formatCurrency(Number(confirmation.total_price || pricing.grandTotal || 0))}
+                      </p>
+                    </div>
+                    <div className="rounded-[20px] border border-emerald-200 bg-white/70 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                        Flight
+                      </p>
+                      <p className="mt-2 text-sm font-semibold text-emerald-900">
+                        {getBookedFlightLabel(confirmation)}
+                      </p>
+                    </div>
+                    <div className="rounded-[20px] border border-emerald-200 bg-white/70 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                        Created
+                      </p>
+                      <p className="mt-2 text-sm font-semibold text-emerald-900">
+                        {confirmation.created_at
+                          ? new Date(confirmation.created_at).toLocaleString()
+                          : "Saved just now"}
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
           ) : null}
         </section>
 
-        <section className="order-1 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm lg:order-1">
-          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <section className="order-1 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm xl:order-1 xl:p-8">
+          <div className="mb-8 grid gap-4 xl:grid-cols-[minmax(0,1fr)_240px] xl:items-end">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
                 AI Results
               </p>
-              <h2 className="mt-2 text-3xl font-semibold text-slate-900">
+              <h2 className="mt-2 max-w-2xl text-4xl font-semibold leading-tight text-slate-900">
                 Recommended package results
               </h2>
-              <p className="mt-2 text-sm text-slate-600">
+              <p className="mt-3 max-w-2xl text-base leading-7 text-slate-600">
                 The planner runs first. Results, pricing, and booking appear
                 here after the AI search completes.
               </p>
             </div>
-            <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
                 Current Trip
               </p>
@@ -1065,7 +1329,7 @@ export default function AIPlannerExperience() {
           </div>
 
           <div className="flex flex-wrap gap-3">
-            {["flights", "hotels", "cars", "pricing"].map((key) => (
+            {["flights", "hotels", "cars", "pricing", "insights"].map((key) => (
               <button
                 key={key}
                 onClick={() => setActiveTab(key)}
@@ -1125,7 +1389,7 @@ export default function AIPlannerExperience() {
           ) : null}
 
           {!searching && !searchError && activeTab === "hotels" ? (
-            <div className="mt-6 grid gap-5 lg:grid-cols-2">
+            <div className="mt-8 grid gap-6 md:grid-cols-2 2xl:grid-cols-3">
               {results.hotels.slice(0, 3).map((hotel, index) => (
                 <HotelResultCard
                   key={hotel.hotel_id}
@@ -1143,7 +1407,7 @@ export default function AIPlannerExperience() {
           ) : null}
 
           {!searching && !searchError && activeTab === "cars" ? (
-            <div className="mt-6 grid gap-5 lg:grid-cols-2">
+            <div className="mt-8 grid gap-6 md:grid-cols-2 2xl:grid-cols-3">
               {results.cars.slice(0, 3).map((car, index) => (
                 <CarResultCard
                   key={car.car_id}
@@ -1163,6 +1427,10 @@ export default function AIPlannerExperience() {
           {!searching && !searchError && activeTab === "pricing" ? (
             <PricingCard pricing={pricing} />
           ) : null}
+
+          {!searching && !searchError && activeTab === "insights" ? (
+              <PlannerInsightsCard insights={plannerInsights} loading={insightsLoading} />
+          ) : null}
         </section>
       </section>
 
@@ -1177,7 +1445,7 @@ export default function AIPlannerExperience() {
           <input
             value={lookupReference}
             onChange={(event) => setLookupReference(event.target.value)}
-            placeholder="SNA1B2C3"
+            placeholder="SNA000123"
             className="min-h-12 flex-1 rounded-full border border-slate-200 bg-slate-50 px-5 text-sm text-slate-900 outline-none transition focus:border-[#173a7a] focus:ring-4 focus:ring-[#173a7a]/10"
           />
           <button
@@ -1203,22 +1471,40 @@ export default function AIPlannerExperience() {
             <h3 className="mt-2 text-xl font-semibold text-slate-900">
               {lookupResult.booking_reference}
             </h3>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <LookupItem
+                label="Status"
+                value={lookupResult.booking_status || "Confirmed"}
+              />
+              <LookupItem
+                label="Dates"
+                value={
+                  [lookupResult.outbound_date, lookupResult.return_date]
+                    .filter(Boolean)
+                    .join(" to ") || "Saved booking"
+                }
+              />
+              <LookupItem
+                label="Created"
+                value={
+                  lookupResult.created_at
+                    ? new Date(lookupResult.created_at).toLocaleString()
+                    : "Saved"
+                }
+              />
+            </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <LookupItem
                 label="Flight"
-                value={lookupResult.flight_details?.flight_number || "Not attached"}
+                value={getBookedFlightLabel(lookupResult)}
               />
               <LookupItem
                 label="Hotel"
-                value={lookupResult.hotel_details?.hotel_name || "Not attached"}
+                value={getBookedHotelLabel(lookupResult)}
               />
               <LookupItem
                 label="Car"
-                value={
-                  `${lookupResult.car_details?.company || ""} ${
-                    lookupResult.car_details?.car_model || ""
-                  }`.trim() || "Not attached"
-                }
+                value={getBookedCarLabel(lookupResult)}
               />
               <LookupItem
                 label="Total"
@@ -1307,6 +1593,53 @@ export default function AIPlannerExperience() {
   );
 }
 
+function errorToMessage(error) {
+  if (!error) {
+    return "";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return (
+    error?.payload?.detail ||
+    error?.payload?.message ||
+    error?.message ||
+    ""
+  );
+}
+
+function getBookedFlightLabel(booking) {
+  return (
+    booking.flight_details?.flight_number ||
+    booking.booking_metadata?.selected_flight?.flight_number ||
+    booking.booking_metadata?.selected_flight?.code ||
+    "Not attached"
+  );
+}
+
+function getBookedHotelLabel(booking) {
+  return (
+    booking.hotel_details?.hotel_name ||
+    booking.booking_metadata?.selected_hotel?.hotel_name ||
+    "Not attached"
+  );
+}
+
+function getBookedCarLabel(booking) {
+  if (booking.car_details?.company || booking.car_details?.car_model) {
+    return `${booking.car_details?.company || ""} ${booking.car_details?.car_model || ""}`.trim();
+  }
+
+  const snapshot = booking.booking_metadata?.selected_car;
+  if (snapshot?.company || snapshot?.car_model) {
+    return `${snapshot.company || ""} ${snapshot.car_model || ""}`.trim();
+  }
+
+  return "Not attached";
+}
+
 function ChatPanel({
   chatInput,
   chatLoading,
@@ -1377,7 +1710,11 @@ function ChatPanel({
                     AI Copilot
                   </div>
                 ) : null}
-                {message.content}
+                {message.role === "assistant" ? (
+                  <ChatMessageContent content={message.content} />
+                ) : (
+                  message.content
+                )}
               </div>
             </div>
           ))}
@@ -1434,6 +1771,46 @@ function formatLocationLabel(location) {
   );
 }
 
+function buildPlannerRouteMap(routeOptions, locationTokensFor) {
+  const map = new Map();
+
+  (routeOptions || []).forEach((origin) => {
+    locationTokensFor(origin).forEach((token) => {
+      map.set(token, origin.destinations || []);
+    });
+  });
+
+  return map;
+}
+
+function getPlannerDestinationOptionsForValue(originValue, routeMap, locationOptions, locationTokensFor) {
+  const normalizedOrigin = String(originValue || "").trim().toLowerCase();
+  if (!normalizedOrigin) {
+    return [];
+  }
+
+  const routeDestinations = routeMap.get(normalizedOrigin);
+  if (Array.isArray(routeDestinations) && routeDestinations.length > 0) {
+    return routeDestinations;
+  }
+
+  const matchedLocation = (locationOptions || []).find((location) =>
+    locationTokensFor(location).includes(normalizedOrigin),
+  );
+  if (!matchedLocation) {
+    return [];
+  }
+
+  for (const token of locationTokensFor(matchedLocation)) {
+    const fallbackDestinations = routeMap.get(token);
+    if (Array.isArray(fallbackDestinations) && fallbackDestinations.length > 0) {
+      return fallbackDestinations;
+    }
+  }
+
+  return [];
+}
+
 function FormField({ label, children }) {
   return (
     <label className="block">
@@ -1480,7 +1857,7 @@ function FlightResultCard({ flight, budget, seatClass, recommended, routeLabel, 
   const reasons = buildRecommendationReasons(getSeatPrice(flight, seatClass), budget);
 
   return (
-    <article className={`rounded-[28px] border bg-white p-5 shadow-sm ${
+    <article className={`flex h-full flex-col rounded-[28px] border bg-white p-6 shadow-sm ${
       selected ? "border-orange-400 ring-2 ring-orange-100" : "border-slate-200"
     }`}>
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1556,6 +1933,8 @@ function FlightResultCard({ flight, budget, seatClass, recommended, routeLabel, 
 
 function HotelResultCard({ hotel, nights, recommended, selected, onSelect }) {
   const amenities = hotel.amenity_list || [];
+  const pricingPending = Boolean(hotel.pricing_pending || hotel.is_discovery_result);
+  const nightlyRate = getHotelNightlyRate(hotel);
 
   return (
     <article className={`rounded-[28px] border bg-white p-5 shadow-sm ${
@@ -1578,16 +1957,29 @@ function HotelResultCard({ hotel, nights, recommended, selected, onSelect }) {
           </p>
         </div>
         <div className="text-right">
-          <p className="text-3xl font-semibold text-slate-900">
-            {formatCurrency(Number(hotel.price_per_night || 0))}
-          </p>
-          <p className="text-sm text-slate-500">
-            Total stay {formatCurrency(Number(hotel.price_per_night || 0) * nights)}
-          </p>
+          {pricingPending ? (
+            <>
+              <p className="text-2xl font-semibold text-slate-900">
+                {hotel.price_display || "Check live offers"}
+              </p>
+              <p className="text-sm text-slate-500">
+                Final room price is confirmed after selection
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-3xl font-semibold text-slate-900">
+                {formatCurrency(nightlyRate)}
+              </p>
+              <p className="text-sm text-slate-500">
+                Total stay {formatCurrency(nightlyRate * nights)}
+              </p>
+            </>
+          )}
         </div>
       </div>
 
-      <div className="mt-4 flex items-center gap-1 text-orange-500">
+      <div className="mt-5 flex items-center gap-1 text-orange-500">
         {Array.from({ length: 5 }).map((_, index) => (
           <Star
             key={index}
@@ -1601,29 +1993,33 @@ function HotelResultCard({ hotel, nights, recommended, selected, onSelect }) {
         </span>
       </div>
 
-      <p className="mt-4 text-sm leading-6 text-slate-600">{hotel.description}</p>
+      <p className="mt-5 text-sm leading-7 text-slate-600">{hotel.description}</p>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-5 flex flex-wrap gap-2">
         {amenities.slice(0, 4).map((amenity) => (
           <Tag key={amenity}>{amenity}</Tag>
         ))}
         {amenities.length > 4 ? <Tag>+more</Tag> : null}
       </div>
 
-      <p className="mt-4 text-sm font-medium text-emerald-600">
-        ✓ {hotel.available_rooms || 0} rooms available
-      </p>
-      <button
-        type="button"
-        onClick={onSelect}
-        className={`mt-5 inline-flex min-h-11 items-center justify-center rounded-full px-4 py-2 text-sm font-semibold transition ${
-          selected
-            ? "bg-orange-500 text-white"
-            : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-        }`}
-      >
-        {selected ? "Selected" : "Select this hotel"}
-      </button>
+      <div className="mt-auto pt-6">
+        <p className="text-sm font-medium text-emerald-600">
+          {pricingPending
+            ? "Check live room availability after selection"
+            : `Available rooms: ${hotel.available_rooms || 0}`}
+        </p>
+        <button
+          type="button"
+          onClick={onSelect}
+          className={`mt-5 inline-flex min-h-11 items-center justify-center rounded-full px-5 py-2 text-sm font-semibold transition ${
+            selected
+              ? "bg-orange-500 text-white"
+              : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+          }`}
+        >
+          {selected ? "Selected" : "Select this hotel"}
+        </button>
+      </div>
     </article>
   );
 }
@@ -1632,7 +2028,7 @@ function CarResultCard({ car, nights, recommended, selected, onSelect }) {
   const features = car.features || [];
 
   return (
-    <article className={`rounded-[28px] border bg-white p-5 shadow-sm ${
+    <article className={`flex h-full flex-col rounded-[28px] border bg-white p-6 shadow-sm ${
       selected ? "border-orange-400 ring-2 ring-orange-100" : "border-slate-200"
     }`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1662,24 +2058,26 @@ function CarResultCard({ car, nights, recommended, selected, onSelect }) {
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-5 flex flex-wrap gap-2">
         <Tag>{car.car_seats || 4} seats</Tag>
         <Tag>Automatic</Tag>
         {features.slice(0, 4).map((feature) => (
           <Tag key={feature}>{feature}</Tag>
         ))}
       </div>
-      <button
-        type="button"
-        onClick={onSelect}
-        className={`mt-5 inline-flex min-h-11 items-center justify-center rounded-full px-4 py-2 text-sm font-semibold transition ${
-          selected
-            ? "bg-orange-500 text-white"
-            : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-        }`}
-      >
-        {selected ? "Selected" : "Select this car"}
-      </button>
+      <div className="mt-auto pt-6">
+        <button
+          type="button"
+          onClick={onSelect}
+          className={`inline-flex min-h-11 items-center justify-center rounded-full px-5 py-2 text-sm font-semibold transition ${
+            selected
+              ? "bg-orange-500 text-white"
+              : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+          }`}
+        >
+          {selected ? "Selected" : "Select this car"}
+        </button>
+      </div>
     </article>
   );
 }
@@ -1709,13 +2107,148 @@ function PricingCard({ pricing }) {
   );
 }
 
+function PlannerInsightsCard({ insights, loading = false }) {
+  const itinerary = Array.isArray(insights.itinerary) ? insights.itinerary : [];
+  const qualityScore = insights.qualityScore;
+
+  return (
+    <div className="mt-6 space-y-6">
+      {loading ? (
+        <div className="rounded-[24px] border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-700">
+          AI insights are loading in the background. Search results are ready to review now.
+        </div>
+      ) : null}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <InsightPanel
+          title="Destination Brief"
+          content={
+            insights.destinationBrief ||
+            "Run the planner to generate destination-specific guidance."
+          }
+        />
+        <InsightPanel
+          title="Visa Guidance"
+          content={
+            insights.visaInfo ||
+            "Visa information will appear here after the planner runs."
+          }
+        />
+        <InsightPanel
+          title="Baggage Guidance"
+          content={
+            insights.baggageInfo ||
+            "Baggage guidance will appear here after the planner runs."
+          }
+        />
+      </div>
+
+      {qualityScore ? (
+        <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+            Quality Score
+          </p>
+          <div className="mt-3 flex items-center gap-3">
+            <div className="text-3xl font-semibold text-slate-900">
+              {qualityScore.score}/10
+            </div>
+            <p className="text-sm text-slate-600">{qualityScore.summary}</p>
+          </div>
+          {Array.isArray(qualityScore.issues) && qualityScore.issues.length > 0 ? (
+            <ul className="mt-4 space-y-2 text-sm text-slate-600">
+              {qualityScore.issues.map((issue) => (
+                <li key={issue}>- {issue}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Day-by-Day Itinerary
+            </p>
+            <h3 className="mt-2 text-2xl font-semibold text-slate-900">
+              AI-generated trip flow
+            </h3>
+          </div>
+        </div>
+
+        {itinerary.length === 0 ? (
+          <EmptyState text="Run the planner to generate a day-by-day itinerary." />
+        ) : (
+          <div className="mt-6 grid gap-4">
+            {itinerary.map((day) => (
+              <div
+                key={`${day.day}-${day.title}`}
+                className="rounded-[24px] border border-slate-200 bg-slate-50 p-5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-orange-500">
+                      Day {day.day}
+                    </p>
+                    <h4 className="mt-2 text-lg font-semibold text-slate-900">
+                      {day.title}
+                    </h4>
+                  </div>
+                  <Tag>{day.estimated_local_spend || "Local spend varies"}</Tag>
+                </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-3">
+                  <ItinerarySlot label="Morning" text={day.morning} />
+                  <ItinerarySlot label="Afternoon" text={day.afternoon} />
+                  <ItinerarySlot label="Evening" text={day.evening} />
+                </div>
+                {Array.isArray(day.highlights) && day.highlights.length > 0 ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {day.highlights.map((highlight) => (
+                      <Tag key={highlight}>{highlight}</Tag>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InsightPanel({ title, content }) {
+  return (
+    <div className="rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+        {title}
+      </p>
+      <p className="mt-3 text-sm leading-7 text-slate-700 whitespace-pre-line">
+        {content}
+      </p>
+    </div>
+  );
+}
+
+function ItinerarySlot({ label, text }) {
+  return (
+    <div className="rounded-[20px] border border-slate-200 bg-white p-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+        {label}
+      </p>
+      <p className="mt-2 text-sm leading-6 text-slate-700">
+        {text || "Free time"}
+      </p>
+    </div>
+  );
+}
+
 function SummaryRow({ icon: Icon, text }) {
   return (
-    <div className="flex items-center gap-3 rounded-[22px] border border-slate-200 p-4 text-sm text-slate-700">
-      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white">
+    <div className="flex items-start gap-4 rounded-[22px] border border-slate-200 p-4 text-sm text-slate-700">
+      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white">
         <Icon className="h-4 w-4" />
       </div>
-      <p>{text}</p>
+      <p className="pt-1 leading-7">{text}</p>
     </div>
   );
 }
@@ -1767,6 +2300,94 @@ function Tag({ children }) {
   );
 }
 
+function ChatMessageContent({ content }) {
+  const blocks = formatChatMessage(content);
+
+  return (
+    <div className="space-y-3">
+      {blocks.map((block, index) => {
+        if (block.type === "heading") {
+          return (
+            <p
+              key={`heading-${index}`}
+              className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500"
+            >
+              {block.text}
+            </p>
+          );
+        }
+
+        if (block.type === "list") {
+          return (
+            <ul key={`list-${index}`} className="space-y-2 pl-4 text-sm leading-6 text-slate-700">
+              {block.items.map((item) => (
+                <li key={item} className="list-disc">
+                  {item}
+                </li>
+              ))}
+            </ul>
+          );
+        }
+
+        return (
+          <p key={`paragraph-${index}`} className="text-sm leading-6 text-slate-700 whitespace-pre-line">
+            {block.text}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatChatMessage(content) {
+  const text = String(content || "").trim();
+  if (!text) {
+    return [{ type: "paragraph", text: "" }];
+  }
+
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*\s*/g, "\n**")
+    .replace(/\s+\*\s/g, "\n* ")
+    .replace(/\s+-\s/g, "\n- ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const lines = normalized.split("\n").map((line) => line.trim()).filter(Boolean);
+  const blocks = [];
+  let currentList = [];
+
+  function flushList() {
+    if (currentList.length > 0) {
+      blocks.push({ type: "list", items: currentList });
+      currentList = [];
+    }
+  }
+
+  lines.forEach((line) => {
+    const headingMatch = line.match(/^\*\*(.+?)\*\*:?$/);
+    if (headingMatch) {
+      flushList();
+      blocks.push({ type: "heading", text: headingMatch[1].trim() });
+      return;
+    }
+
+    if (line.startsWith("* ") || line.startsWith("- ")) {
+      currentList.push(line.slice(2).trim());
+      return;
+    }
+
+    flushList();
+    blocks.push({
+      type: "paragraph",
+      text: line.replace(/\*\*(.+?)\*\*/g, "$1"),
+    });
+  });
+
+  flushList();
+  return blocks.length > 0 ? blocks : [{ type: "paragraph", text }];
+}
+
 function describeBudget(budget) {
   if (budget < 1500) return "Budget - Economy · 2-3 star hotels · Value cars";
   if (budget < 4000) return "Standard - Economy+ · 3-4 star hotels";
@@ -1777,7 +2398,7 @@ function describeBudget(budget) {
 function buildPricing(selectedFlight, selectedHotel, selectedCar, form, nights) {
   const flightTotal =
     getSeatPrice(selectedFlight, form.seatClass) * Number(form.passengers || 1);
-  const hotelTotal = Number(selectedHotel?.price_per_night || 0) * nights;
+  const hotelTotal = getHotelNightlyRate(selectedHotel) * nights;
   const carTotal = Number(selectedCar?.price_per_day || 0) * nights;
   const subtotal = flightTotal + hotelTotal + carTotal;
   const discount = selectedFlight && selectedHotel && selectedCar ? subtotal * 0.12 : 0;
@@ -1802,6 +2423,42 @@ function buildRecommendationReasons(price, budget) {
     "Highest rated route in our network",
     "Best departure time for your itinerary",
   ];
+}
+
+function getHotelNightlyRate(hotel) {
+  if (!hotel) return 0;
+
+  const directCandidates = [
+    hotel.price_per_night,
+    hotel.price,
+    hotel.nightly_rate,
+    hotel.price_confirmed,
+    hotel.provider_metadata?.price_per_night,
+    hotel.provider_metadata?.price,
+  ];
+
+  for (const value of directCandidates) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric;
+    }
+  }
+
+  const displayCandidates = [
+    hotel.price_display,
+    hotel.provider_metadata?.price_display,
+  ];
+
+  for (const value of displayCandidates) {
+    const match = String(value || "").match(/(\d+(?:\.\d+)?)/);
+    if (!match) continue;
+    const numeric = Number(match[1]);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric;
+    }
+  }
+
+  return 0;
 }
 
 function getSeatPrice(flight, seatClass) {

@@ -1,7 +1,10 @@
 from datetime import timedelta
 from decimal import Decimal
+import logging
 import re
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.mail import EmailMultiAlternatives
+from django.db import IntegrityError
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import status
@@ -33,6 +36,7 @@ from django.conf import settings
 from .services.health_service import build_health_report
 from .services.inventory_service import InventoryService
 from .services.planner_service import PlannerService
+from .services.providers import ProviderSearchContext, get_hotel_provider
 from .serializers import (
     FlightSerializer,
     HotelSerializer,
@@ -44,6 +48,9 @@ from .serializers import (
     PlannerMessageSerializer,
     ItineraryDraftSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(["GET"])
@@ -142,6 +149,7 @@ def get_bookings(request):
     trip_days = request.data.get("trip_days")
     passengers = request.data.get("passengers")
     seat_class = request.data.get("seat_class")
+    booking_metadata = request.data.get("booking_metadata") or {}
     name = (request.data.get("name") or "").strip()
     email = (request.data.get("email") or "").strip().lower()
 
@@ -168,21 +176,44 @@ def get_bookings(request):
             )
         customer_id = customer.customer_id
 
-    booking = Bookings.objects.create(
-        customer_id=customer_id or None,
-        flight_id=flight_id or None,
-        return_flight_id=return_flight_id or None,
-        hotel_id=hotel_id or None,
-        car_id=car_id or None,
-        outbound_date=outbound_value,
-        return_date=return_value,
-        is_bundle=bool(hotel_id or car_id or return_flight_id),
-        total_price=Decimal(str(total_price)) if total_price is not None else None,
-        booking_status="Confirmed",
-        passengers=parse_int_value(passengers) or 1,
-        seat_class=seat_class or "Economy",
-        created_at=timezone.now(),
+    customer_id = validate_related_id(Customers, customer_id)
+    flight_id = validate_related_id(Flights, flight_id)
+    return_flight_id = validate_related_id(Flights, return_flight_id)
+    hotel_id = validate_related_id(Hotels, hotel_id)
+    car_id = validate_related_id(Cars, car_id)
+    normalized_booking_metadata = normalize_booking_metadata(
+        booking_metadata if isinstance(booking_metadata, dict) else {},
+        flight_id=flight_id,
+        return_flight_id=return_flight_id,
+        hotel_id=hotel_id,
+        car_id=car_id,
+        total_price=total_price,
+        seat_class=seat_class,
+        passengers=passengers,
     )
+
+    try:
+        booking = Bookings.objects.create(
+            customer_id=customer_id or None,
+            flight_id=flight_id or None,
+            return_flight_id=return_flight_id or None,
+            hotel_id=hotel_id or None,
+            car_id=car_id or None,
+            outbound_date=outbound_value,
+            return_date=return_value,
+            is_bundle=bool(hotel_id or car_id or return_flight_id),
+            total_price=Decimal(str(total_price)) if total_price is not None else None,
+            booking_status="Confirmed",
+            passengers=parse_int_value(passengers) or 1,
+            seat_class=seat_class or "Economy",
+            booking_metadata=normalized_booking_metadata,
+            created_at=timezone.now(),
+        )
+    except (IntegrityError, ValueError, TypeError, ArithmeticError):
+        return Response(
+            {"message": "The selected booking details are no longer valid. Please reselect your trip and try again."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     queryset = Bookings.objects.select_related(
         "customer",
@@ -197,6 +228,11 @@ def get_bookings(request):
         "hotel__country",
         "car__country",
     ).get(pk=booking.pk)
+
+    try:
+        send_booking_confirmation_email(queryset)
+    except Exception:  # pragma: no cover - email delivery should not fail booking creation
+        logger.exception("Booking confirmation email failed for booking %s", booking.pk)
 
     return Response(BookingSerializer(queryset).data, status=status.HTTP_201_CREATED)
 
@@ -254,6 +290,97 @@ def get_flight_locations(request):
     return Response(locations)
 
 
+@api_view(["GET"])
+def get_flight_routes(request):
+    flights = (
+        Flights.objects.select_related(
+            "departure_airport__country",
+            "arrival_airport__country",
+        )
+        .exclude(departure_airport__isnull=True)
+        .exclude(arrival_airport__isnull=True)
+        .order_by("departure_airport__city", "arrival_airport__city", "flight_id")
+    )
+
+    origins = {}
+
+    for flight in flights:
+        departure_airport = flight.departure_airport
+        arrival_airport = flight.arrival_airport
+
+        if departure_airport is None or arrival_airport is None:
+            continue
+
+        departure_city = (departure_airport.city or "").strip()
+        arrival_city = (arrival_airport.city or "").strip()
+        departure_code = (departure_airport.city_code or "").strip().upper()
+        arrival_code = (arrival_airport.city_code or "").strip().upper()
+
+        if not departure_city or not arrival_city:
+            continue
+
+        departure_country = (
+            departure_airport.country.country_name.strip()
+            if departure_airport.country and departure_airport.country.country_name
+            else ""
+        )
+        arrival_country = (
+            arrival_airport.country.country_name.strip()
+            if arrival_airport.country and arrival_airport.country.country_name
+            else ""
+        )
+
+        departure_label = ", ".join(part for part in [departure_city, departure_country] if part)
+        if departure_code:
+            departure_label = f"{departure_label} ({departure_code})" if departure_label else departure_code
+
+        arrival_label = ", ".join(part for part in [arrival_city, arrival_country] if part)
+        if arrival_code:
+            arrival_label = f"{arrival_label} ({arrival_code})" if arrival_label else arrival_code
+
+        origin_key = departure_label.lower()
+        origin_entry = origins.setdefault(
+            origin_key,
+            {
+                "label": departure_label,
+                "city": departure_city,
+                "city_code": departure_code,
+                "country": departure_country,
+                "destinations": [],
+                "_seen_destinations": set(),
+            },
+        )
+
+        destination_key = arrival_label.lower()
+        if destination_key in origin_entry["_seen_destinations"]:
+            continue
+
+        origin_entry["_seen_destinations"].add(destination_key)
+        origin_entry["destinations"].append(
+            {
+                "label": arrival_label,
+                "city": arrival_city,
+                "city_code": arrival_code,
+                "country": arrival_country,
+            }
+        )
+
+    payload = []
+    for origin in origins.values():
+        payload.append(
+            {
+                "label": origin["label"],
+                "city": origin["city"],
+                "city_code": origin["city_code"],
+                "country": origin["country"],
+                "destinations": sorted(origin["destinations"], key=lambda item: (item["city"], item["label"])),
+            }
+        )
+
+    payload.sort(key=lambda item: (item["city"], item["label"]))
+    return Response(payload)
+
+
 @api_view(["POST"])
 def ai_chat(request):
     message = (request.data.get("message") or "").strip()
@@ -263,7 +390,17 @@ def ai_chat(request):
         return Response({"reply": "Please ask a travel question so I can help."}, status=status.HTTP_400_BAD_REQUEST)
 
     planner_service = PlannerService()
-    planner_reply = planner_service.generate_chat_reply(message, history)
+    try:
+        planner_reply = planner_service.generate_chat_reply(message, history)
+    except Exception as exc:
+        logger.exception("AI chat failed")
+        return Response(
+            {
+                "message": "AI chat is temporarily unavailable.",
+                "detail": str(exc),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response(
         {
             "reply": planner_reply.reply,
@@ -309,15 +446,25 @@ def planner_session_message(request, session_id):
     planner_service = PlannerService()
     history = [{"role": item.role, "content": item.content} for item in session.messages.all()]
     planner_service.add_message(session, "user", message)
-    planner_reply = planner_service.generate_chat_reply(message, history)
-    assistant_message = planner_service.add_message(
-        session,
-        "assistant",
-        planner_reply.reply,
-        {"mode": planner_reply.mode, "sources": planner_reply.sources},
-    )
-    session.updated_at = timezone.now()
-    session.save(update_fields=["updated_at"])
+    try:
+        planner_reply = planner_service.generate_chat_reply(message, history)
+        assistant_message = planner_service.add_message(
+            session,
+            "assistant",
+            planner_reply.reply,
+            {"mode": planner_reply.mode, "sources": planner_reply.sources},
+        )
+        session.updated_at = timezone.now()
+        session.save(update_fields=["updated_at"])
+    except Exception as exc:
+        logger.exception("Planner session message failed for session %s", session_id)
+        return Response(
+            {
+                "message": "Planner chat is temporarily unavailable.",
+                "detail": str(exc),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     return Response(
         {
@@ -336,10 +483,51 @@ def planner_session_plan(request, session_id):
         return Response({"message": "Planner session not found."}, status=status.HTTP_404_NOT_FOUND)
 
     planner_service = PlannerService()
-    draft = planner_service.build_trip_plan(session, request.data)
-    session.updated_at = timezone.now()
-    session.save(update_fields=["updated_at"])
+    try:
+        include_insights = request.data.get("include_insights", True)
+        if isinstance(include_insights, str):
+            include_insights = include_insights.lower() not in {"false", "0", "no"}
+        draft = planner_service.build_trip_plan(session, request.data, include_insights=bool(include_insights))
+        session.updated_at = timezone.now()
+        session.save(update_fields=["updated_at"])
+    except Exception as exc:
+        logger.exception("Planner build failed for session %s", session_id)
+        return Response(
+            {
+                "message": "Planner could not complete this live search right now.",
+                "detail": str(exc),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response(ItineraryDraftSerializer(draft).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+def planner_draft_enrich(request, session_id, draft_id):
+    session = PlannerSessions.objects.prefetch_related("messages").filter(pk=session_id).first()
+    if session is None:
+        return Response({"message": "Planner session not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    draft = ItineraryDrafts.objects.filter(pk=draft_id, session=session).first()
+    if draft is None:
+        return Response({"message": "Planner draft not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    planner_service = PlannerService()
+    try:
+        draft = planner_service.enrich_draft(draft)
+        session.updated_at = timezone.now()
+        session.save(update_fields=["updated_at"])
+    except Exception as exc:
+        logger.exception("Planner enrichment failed for draft %s", draft_id)
+        return Response(
+            {
+                "message": "Planner insights are temporarily unavailable.",
+                "detail": str(exc),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    return Response(ItineraryDraftSerializer(draft).data)
 
 
 @api_view(["POST"])
@@ -353,9 +541,19 @@ def planner_draft_revalidate(request, session_id, draft_id):
         return Response({"message": "Planner draft not found."}, status=status.HTTP_404_NOT_FOUND)
 
     planner_service = PlannerService()
-    draft = planner_service.revalidate_draft(draft)
-    session.updated_at = timezone.now()
-    session.save(update_fields=["updated_at"])
+    try:
+        draft = planner_service.revalidate_draft(draft)
+        session.updated_at = timezone.now()
+        session.save(update_fields=["updated_at"])
+    except Exception as exc:
+        logger.exception("Planner revalidation failed for draft %s", draft_id)
+        return Response(
+            {
+                "message": "Planner could not revalidate the selected package right now.",
+                "detail": str(exc),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response(ItineraryDraftSerializer(draft).data)
 
 
@@ -370,9 +568,19 @@ def planner_draft_update(request, session_id, draft_id):
         return Response({"message": "Planner draft not found."}, status=status.HTTP_404_NOT_FOUND)
 
     planner_service = PlannerService()
-    draft = planner_service.update_draft_selection(draft, request.data)
-    session.updated_at = timezone.now()
-    session.save(update_fields=["updated_at"])
+    try:
+        draft = planner_service.update_draft_selection(draft, request.data)
+        session.updated_at = timezone.now()
+        session.save(update_fields=["updated_at"])
+    except Exception as exc:
+        logger.exception("Planner draft update failed for draft %s", draft_id)
+        return Response(
+            {
+                "message": "Planner could not update the selected package right now.",
+                "detail": str(exc),
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response(ItineraryDraftSerializer(draft).data)
 
 
@@ -387,7 +595,8 @@ def provider_status(request):
             "flight_provider_configured": bool(settings.FLIGHT_PROVIDER_BASE_URL) if settings.FLIGHT_PROVIDER != "local_db" else True,
             "hotel_provider_configured": bool(settings.HOTEL_PROVIDER_BASE_URL) if settings.HOTEL_PROVIDER != "local_db" else True,
             "car_provider_configured": bool(settings.CAR_PROVIDER_BASE_URL) if settings.CAR_PROVIDER != "local_db" else True,
-            "rag_configured": bool(settings.OPENAI_API_KEY),
+            "rag_configured": bool(getattr(settings, "OPENAI_API_KEY", "")) or bool(getattr(settings, "GROQ_API_KEY", "")),
+            "llm_provider": getattr(settings, "LLM_PROVIDER", "openai"),
         }
     )
 
@@ -405,8 +614,8 @@ def readiness_status(request):
     missing = []
     if not report["database"]["ok"]:
         missing.append("database_connection")
-    if not report["rag"]["openai_configured"]:
-        missing.append("openai_api_key")
+    if not report["rag"].get("llm_configured", False):
+        missing.append("llm_api_key")
     if not report["providers"]["flight_provider_configured"]:
         missing.append("flight_provider_base_url")
     if not report["providers"]["hotel_provider_configured"]:
@@ -425,7 +634,7 @@ def readiness_status(request):
             "ready": ready,
             "checked_at": timezone.now().isoformat(),
             "database_ok": report["database"]["ok"],
-            "rag_configured": report["rag"]["openai_configured"],
+            "rag_configured": report["rag"].get("llm_configured", False),
             "providers": report["providers"],
             "missing": missing,
         },
@@ -437,6 +646,8 @@ def readiness_status(request):
 def search_flights(request):
     origin = (request.data.get("origin") or "").strip()
     destination = (request.data.get("destination") or "").strip()
+    departure_date = (request.data.get("departure_date") or "").strip()
+    return_date = (request.data.get("return_date") or "").strip()
     seat_class = (request.data.get("seat_class") or "").strip()
     airline = (request.data.get("airline") or "").strip()
     min_seats = parse_int_value(request.data.get("min_seats"))
@@ -450,6 +661,8 @@ def search_flights(request):
         preferences={
             "seat_class": seat_class or "Economy",
             "airline": airline,
+            "departure_date": departure_date,
+            "return_date": return_date,
         },
         force_refresh=force_refresh,
     )
@@ -467,6 +680,7 @@ def search_hotels(request):
     inventory_service = InventoryService()
     hotels = inventory_service.search_hotels(
         destination=city,
+        passengers=parse_int_value(request.data.get("adults_number")) or 1,
         preferences={
             "hotel_style": hotel_style,
             "hotel_amenities": hotel_amenities,
@@ -475,6 +689,32 @@ def search_hotels(request):
         force_refresh=force_refresh,
     )
     return Response(hotels[:8])
+
+
+@api_view(["POST"])
+def hotel_offer_lookup(request):
+    hotel_option = request.data.get("hotel") or {}
+    city = (request.data.get("city") or "").strip()
+    checkin_date = (request.data.get("checkin_date") or "").strip()
+    checkout_date = (request.data.get("checkout_date") or "").strip()
+    adults_number = parse_int_value(request.data.get("adults_number")) or 1
+
+    if not isinstance(hotel_option, dict) or not hotel_option:
+        return Response({"message": "Hotel selection is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not checkin_date or not checkout_date:
+        return Response({"message": "Check-in and check-out dates are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    provider = get_hotel_provider()
+    context = ProviderSearchContext(
+        destination=city,
+        passengers=adults_number,
+        preferences={
+            "checkin_date": checkin_date,
+            "checkout_date": checkout_date,
+        },
+    )
+    offer = provider.fetch_offer(hotel_option, context)
+    return Response(offer)
 
 
 @api_view(["POST"])
@@ -1072,10 +1312,125 @@ def apply_hotel_rating_filter(queryset, hotel_rating):
 
 
 def parse_booking_reference(reference):
-    match = re.fullmatch(r"SNA(\d{6})", str(reference or "").strip().upper())
-    if not match:
+    normalized = str(reference or "").strip().upper()
+    if not normalized:
         return None
-    return int(match.group(1))
+
+    prefixed_match = re.fullmatch(r"SNA0*(\d+)", normalized)
+    if prefixed_match:
+        return int(prefixed_match.group(1))
+
+    numeric_match = re.fullmatch(r"0*(\d+)", normalized)
+    if numeric_match:
+        return int(numeric_match.group(1))
+
+    return None
+
+
+def normalize_booking_metadata(
+    booking_metadata,
+    *,
+    flight_id,
+    return_flight_id,
+    hotel_id,
+    car_id,
+    total_price,
+    seat_class,
+    passengers,
+):
+    metadata = dict(booking_metadata or {})
+    existing_provider_booking = metadata.get("provider_booking")
+    provider_booking = dict(existing_provider_booking) if isinstance(existing_provider_booking, dict) else {}
+
+    items = {
+        "flight": _build_booking_item_snapshot(
+            selection=metadata.get("selected_flight"),
+            local_inventory_id=flight_id,
+            item_type="flight",
+        ),
+        "return_flight": _build_booking_item_snapshot(
+            selection=metadata.get("selected_return_flight"),
+            local_inventory_id=return_flight_id,
+            item_type="return_flight",
+        ),
+        "hotel": _build_booking_item_snapshot(
+            selection=metadata.get("selected_hotel"),
+            local_inventory_id=hotel_id,
+            item_type="hotel",
+        ),
+        "car": _build_booking_item_snapshot(
+            selection=metadata.get("selected_car"),
+            local_inventory_id=car_id,
+            item_type="car",
+        ),
+    }
+    items = {key: value for key, value in items.items() if value is not None}
+
+    provider_booking.update(
+        {
+            "version": 1,
+            "status": provider_booking.get("status") or "confirmed",
+            "source_of_truth": determine_booking_source_of_truth(items),
+            "seat_class": seat_class or provider_booking.get("seat_class") or "Economy",
+            "passengers": parse_int_value(passengers) or provider_booking.get("passengers") or 1,
+            "total_price": str(total_price) if total_price is not None else provider_booking.get("total_price"),
+            "items": items,
+        }
+    )
+    provider_booking["provider_refs"] = {
+        key: value.get("provider_reference")
+        for key, value in items.items()
+        if value.get("provider_reference")
+    }
+
+    metadata["provider_booking"] = provider_booking
+    return metadata
+
+
+def _build_booking_item_snapshot(*, selection, local_inventory_id, item_type):
+    if not isinstance(selection, dict) or not selection:
+        if local_inventory_id is None:
+            return None
+        return {
+            "item_type": item_type,
+            "provider": "local_db",
+            "provider_reference": f"{item_type}:{local_inventory_id}",
+            "local_inventory_id": local_inventory_id,
+            "source": "database",
+            "selection": {},
+            "supports_recheck": True,
+        }
+
+    provider = str(selection.get("provider") or ("local_db" if local_inventory_id else "external")).strip().lower()
+    provider_reference = (
+        selection.get("provider_reference")
+        or selection.get("offer_id")
+        or selection.get("id")
+        or selection.get(f"{item_type}_id")
+    )
+    source = "database" if provider == "local_db" or local_inventory_id else "external"
+    return {
+        "item_type": item_type,
+        "provider": provider,
+        "provider_reference": str(provider_reference) if provider_reference is not None else None,
+        "local_inventory_id": local_inventory_id,
+        "source": source,
+        "selection": selection,
+        "supports_recheck": bool(provider_reference),
+    }
+
+
+def determine_booking_source_of_truth(items):
+    if not items:
+        return "unknown"
+    sources = {value.get("source") for value in items.values()}
+    if sources == {"database"}:
+        return "database"
+    if "external" in sources and "database" in sources:
+        return "hybrid"
+    if "external" in sources:
+        return "external"
+    return "database"
 
 
 def parse_date_value(value):
@@ -1096,6 +1451,13 @@ def parse_int_value(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def validate_related_id(model, value):
+    parsed_value = parse_int_value(value)
+    if not parsed_value:
+        return None
+    return parsed_value if model.objects.filter(pk=parsed_value).exists() else None
 
 
 def parse_float_value(value):
@@ -1158,6 +1520,109 @@ def build_car_payload(data):
         "availability": parse_bool_value(data.get("availability")),
         "description": (data.get("description") or "").strip() or None,
     }
+
+
+def send_booking_confirmation_email(booking):
+    if not settings.BOOKING_CONFIRMATION_EMAILS_ENABLED:
+        return
+
+    recipient = (booking.customer.email if booking.customer and booking.customer.email else "").strip().lower()
+    if not recipient:
+        return
+
+    booking_reference = f"SNA{int(booking.booking_id):06d}"
+    customer_name = (booking.customer.name if booking.customer and booking.customer.name else "Traveler").strip()
+    metadata = booking.booking_metadata or {}
+
+    outbound_flight = booking.flight
+    return_flight = booking.return_flight
+    hotel = booking.hotel
+    car = booking.car
+
+    selected_flight = metadata.get("selected_flight") or {}
+    selected_return_flight = metadata.get("selected_return_flight") or {}
+    selected_hotel = metadata.get("selected_hotel") or {}
+    selected_car = metadata.get("selected_car") or {}
+
+    lines = [
+        f"Hello {customer_name},",
+        "",
+        "Your SkyBook booking is confirmed.",
+        "",
+        f"Booking reference: {booking_reference}",
+        f"Status: {booking.booking_status or 'Confirmed'}",
+        f"Travel dates: {booking.outbound_date} to {booking.return_date}",
+        f"Passengers: {booking.passengers or 1}",
+        f"Seat class: {booking.seat_class or 'Economy'}",
+        f"Total paid: {booking.total_price or 'N/A'}",
+        "",
+        "Trip summary:",
+    ]
+
+    lines.extend(build_booking_email_item_lines("Outbound flight", outbound_flight, selected_flight))
+    if return_flight or selected_return_flight:
+        lines.extend(build_booking_email_item_lines("Return flight", return_flight, selected_return_flight))
+    if hotel or selected_hotel:
+        lines.extend(build_booking_email_item_lines("Hotel", hotel, selected_hotel))
+    if car or selected_car:
+        lines.extend(build_booking_email_item_lines("Car", car, selected_car))
+
+    lines.extend([
+        "",
+        "Thank you for booking with SkyBook.",
+    ])
+
+    subject = f"SkyBook booking confirmed: {booking_reference}"
+    text_body = "\n".join(lines)
+    html_body = "<br>".join(line if line else "&nbsp;" for line in lines)
+
+    message = EmailMultiAlternatives(
+        subject=subject,
+        body=text_body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[recipient],
+    )
+    message.attach_alternative(f"<html><body>{html_body}</body></html>", "text/html")
+    message.send(fail_silently=False)
+
+
+def build_booking_email_item_lines(label, model_item, snapshot):
+    details = []
+    if label in {"Outbound flight", "Return flight"}:
+        airline = (
+            getattr(model_item, "airline", None)
+            or snapshot.get("airline")
+            or snapshot.get("provider")
+            or "Flight"
+        )
+        code = (
+            getattr(model_item, "flight_number", None)
+            or snapshot.get("flight_number")
+            or snapshot.get("code")
+            or ""
+        )
+        details.append(f"- {label}: {airline} {code}".strip())
+    elif label == "Hotel":
+        hotel_name = getattr(model_item, "hotel_name", None) or snapshot.get("hotel_name") or "Selected hotel"
+        city = getattr(model_item, "city", None) or snapshot.get("city") or ""
+        details.append(f"- Hotel: {hotel_name}{f' ({city})' if city else ''}")
+    elif label == "Car":
+        company = getattr(model_item, "company", None) or snapshot.get("company") or "Rental"
+        model_name = getattr(model_item, "car_model", None) or snapshot.get("car_model") or "Car"
+        details.append(f"- Car: {company} {model_name}".strip())
+
+    price = None
+    if label in {"Outbound flight", "Return flight"}:
+        price = getattr(model_item, "base_price", None) or snapshot.get("price")
+    elif label == "Hotel":
+        price = getattr(model_item, "price_per_night", None) or snapshot.get("price_per_night")
+    elif label == "Car":
+        price = getattr(model_item, "price_per_day", None) or snapshot.get("price_per_day")
+
+    if price not in [None, ""]:
+        details.append(f"  Price: {price}")
+
+    return details
 
 
 @api_view(["GET"])

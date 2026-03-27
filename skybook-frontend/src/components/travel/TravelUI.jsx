@@ -109,6 +109,13 @@ export function TrendingTripCard({ trip }) {
       <h3 className="mt-4 text-xl font-semibold text-slate-900">{trip.title}</h3>
       <p className="mt-2 text-sm leading-6 text-slate-600">{trip.description}</p>
       <p className="mt-5 text-lg font-semibold text-slate-900">{formatCurrency(trip.price)}</p>
+      <Link
+        href={`/bundles/${trip.slug || trip.id}`}
+        className="mt-5 inline-flex items-center gap-2 text-sm font-semibold text-[#173a7a] transition hover:text-orange-500"
+      >
+        View package
+        <ArrowRight className="h-4 w-4" />
+      </Link>
     </article>
   );
 }
@@ -167,6 +174,11 @@ export function FlightCard({
           <div>
             <p className="text-lg font-semibold text-slate-900">{flight.airline}</p>
             <p className="text-sm text-slate-500">{flight.code}</p>
+            {flight.sourceLabel ? (
+              <span className="mt-2 inline-flex rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                {flight.sourceLabel}
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -237,10 +249,25 @@ export function ProductCard({
       <div className="space-y-4 p-5">
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">{item.location || item.type}</p>
-          <p className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-700">
-            <Star className="h-4 w-4 fill-orange-400 text-orange-400" />
-            {item.rating}
-          </p>
+          <div className="flex items-center gap-2">
+            {item.sourceLabel ? (
+              <span
+                className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${
+                  item.sourceLabel === "Reference price"
+                    ? "bg-amber-50 text-amber-700"
+                    : item.sourceLabel === "Price pending"
+                      ? "bg-slate-100 text-slate-600"
+                      : "bg-emerald-50 text-emerald-700"
+                }`}
+              >
+                {item.sourceLabel}
+              </span>
+            ) : null}
+            <p className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-700">
+              <Star className="h-4 w-4 fill-orange-400 text-orange-400" />
+              {item.rating}
+            </p>
+          </div>
         </div>
         <p className="text-lg font-semibold text-slate-900">{item.name}</p>
         <p className="text-sm leading-6 text-slate-600">{item.details}</p>
@@ -248,8 +275,11 @@ export function ProductCard({
           <div>
             <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{pricePrefix}</p>
             <p className="text-xl font-semibold text-slate-900">
-              {formatCurrency(item.pricePerDay)}
+              {item.pricingPending ? item.priceLabel || "Check live offers" : formatCurrency(item.pricePerDay || 0)}
             </p>
+            {item.pricingPending ? (
+              <p className="mt-1 text-xs text-slate-500">Final price is confirmed after hotel selection.</p>
+            ) : null}
           </div>
           <div className="flex flex-col items-end gap-2">
             {onToggleSave ? (
@@ -289,14 +319,24 @@ export function ProductCard({
 
 export function SummaryPanel({
   flight,
+  returnFlight,
   hotel,
   car,
+  duration = 1,
   total,
   ctaHref,
   ctaLabel,
   title = "Booking Summary",
   description = "Review everything before continuing.",
 }) {
+  const stayDays = Math.max(duration || 1, 1);
+  const flightTotal = flight ? flight.price || 0 : 0;
+  const returnFlightTotal = returnFlight ? returnFlight.price || 0 : 0;
+  const hotelUnitPrice = hotel ? hotel.pricePerDay || 0 : 0;
+  const hotelTotal = hotelUnitPrice * stayDays;
+  const carUnitPrice = car ? car.pricePerDay || 0 : 0;
+  const carTotal = carUnitPrice * stayDays;
+
   return (
     <aside className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
       <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
@@ -308,25 +348,65 @@ export function SummaryPanel({
       <div className="mt-6 space-y-4">
         <SummaryItem
           icon={PlaneTakeoff}
-          title="Selected Flight"
+          title="Outbound Flight"
           name={flight ? `${flight.airline} ${flight.code}` : "Not selected yet"}
-          price={flight ? flight.price : 0}
+          price={flightTotal}
+          detail="One-time flight price"
         />
+        {returnFlight ? (
+          <SummaryItem
+            icon={PlaneTakeoff}
+            title="Return Flight"
+            name={`${returnFlight.airline} ${returnFlight.code}`}
+            price={returnFlightTotal}
+            detail="One-time return flight price"
+          />
+        ) : null}
         <SummaryItem
           icon={ShieldCheck}
           title="Selected Hotel"
           name={hotel ? hotel.name : "Not selected yet"}
-          price={hotel ? hotel.pricePerDay : 0}
+          price={hotelTotal}
+          detail={
+            hotel
+              ? `${formatCurrency(hotelUnitPrice)} per night x ${stayDays} ${stayDays === 1 ? "night" : "nights"}`
+              : "No hotel cost yet"
+          }
         />
         <SummaryItem
           icon={CarFront}
           title="Selected Car"
           name={car ? car.name : "Not selected yet"}
-          price={car ? car.pricePerDay : 0}
+          price={carTotal}
+          detail={
+            car
+              ? `${formatCurrency(carUnitPrice)} per day x ${stayDays} ${stayDays === 1 ? "day" : "days"}`
+              : "No car cost yet"
+          }
         />
       </div>
 
       <div className="mt-6 rounded-[24px] bg-slate-50 p-4">
+        <div className="mb-3 space-y-2 text-sm text-slate-600">
+          <div className="flex items-center justify-between">
+            <span>Outbound flight</span>
+            <span className="font-medium text-slate-900">{formatCurrency(flightTotal)}</span>
+          </div>
+          {returnFlight ? (
+            <div className="flex items-center justify-between">
+              <span>Return flight</span>
+              <span className="font-medium text-slate-900">{formatCurrency(returnFlightTotal)}</span>
+            </div>
+          ) : null}
+          <div className="flex items-center justify-between">
+            <span>Hotel total</span>
+            <span className="font-medium text-slate-900">{formatCurrency(hotelTotal)}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Car total</span>
+            <span className="font-medium text-slate-900">{formatCurrency(carTotal)}</span>
+          </div>
+        </div>
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">Total price</p>
           <p className="text-2xl font-semibold text-slate-900">{formatCurrency(total)}</p>
@@ -343,7 +423,7 @@ export function SummaryPanel({
   );
 }
 
-function SummaryItem({ icon: Icon, title, name, price }) {
+function SummaryItem({ icon: Icon, title, name, price, detail }) {
   return (
     <div className="flex items-center justify-between rounded-[24px] border border-slate-200 p-4">
       <div className="flex items-start gap-3">
@@ -353,9 +433,10 @@ function SummaryItem({ icon: Icon, title, name, price }) {
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{title}</p>
           <p className="mt-1 font-semibold text-slate-900">{name}</p>
+          {detail ? <p className="mt-1 text-xs text-slate-500">{detail}</p> : null}
         </div>
       </div>
-      <p className="text-sm font-semibold text-slate-900">{formatCurrency(price)}</p>
+      <p className="text-sm font-semibold text-slate-900">{formatCurrency(price || 0)}</p>
     </div>
   );
 }

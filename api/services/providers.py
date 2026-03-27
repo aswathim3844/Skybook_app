@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 import logging
+from urllib.parse import urlparse
 from typing import Any
 
 from django.conf import settings
 from django.db.models import Q
 import requests
+from requests import HTTPError
 
 from api.models import Cars, Flights, Hotels
 from api.serializers import CarSerializer, FlightSerializer, HotelSerializer
@@ -37,6 +39,9 @@ class BaseProviderAdapter:
         raise NotImplementedError
 
     def revalidate(self, option: dict[str, Any], context: ProviderSearchContext) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def fetch_offer(self, option: dict[str, Any], context: ProviderSearchContext) -> dict[str, Any]:
         raise NotImplementedError
 
     def _get_timeout(self) -> float:
@@ -82,6 +87,12 @@ class BaseProviderAdapter:
         response.raise_for_status()
         payload = response.json()
         return payload if isinstance(payload, dict) else {"results": payload}
+
+    def _get_host(self) -> str:
+        base_url = self._get_base_url()
+        if not base_url:
+            return ""
+        return urlparse(base_url).netloc
 
 
 class LocalFlightProviderAdapter(BaseProviderAdapter):
@@ -176,6 +187,16 @@ class LocalHotelProviderAdapter(BaseProviderAdapter):
             "price_confirmed": option.get("price_per_night"),
             "currency": "USD",
             "status": "validated_via_local_inventory" if option else "not_found",
+        }
+
+    def fetch_offer(self, option: dict[str, Any], context: ProviderSearchContext) -> dict[str, Any]:
+        return {
+            **option,
+            "pricing_pending": False,
+            "offer_lookup_required": False,
+            "price_display": option.get("price_per_night"),
+            "offer_status": "available",
+            "offer_message": "Price confirmed from local inventory.",
         }
 
 
@@ -300,6 +321,16 @@ class MockHotelProviderAdapter(BaseProviderAdapter):
             "status": "validated_via_mock_provider",
         }
 
+    def fetch_offer(self, option: dict[str, Any], context: ProviderSearchContext) -> dict[str, Any]:
+        return {
+            **option,
+            "pricing_pending": False,
+            "offer_lookup_required": False,
+            "price_display": option.get("price_per_night"),
+            "offer_status": "available",
+            "offer_message": "Price confirmed from mock provider.",
+        }
+
 
 class MockCarProviderAdapter(BaseProviderAdapter):
     provider_name = "mock_provider"
@@ -345,6 +376,24 @@ class ExternalFlightProviderAdapter(BaseProviderAdapter):
     base_url_setting = "FLIGHT_PROVIDER_BASE_URL"
 
     def search(self, context: ProviderSearchContext) -> list[dict[str, Any]]:
+        if "serpapi.com" in self._get_base_url():
+            params = {
+                "engine": "google_flights",
+                "departure_id": context.origin,
+                "arrival_id": context.destination,
+                "outbound_date": (context.preferences or {}).get("departure_date"),
+                "return_date": (context.preferences or {}).get("return_date"),
+                "type": "1" if (context.preferences or {}).get("return_date") else "2",
+                "adults": max(int(context.passengers or 1), 1),
+                "travel_class": self._map_serpapi_travel_class((context.preferences or {}).get("seat_class")),
+                "currency": "USD",
+                "hl": "en",
+                "api_key": self._get_api_key(),
+            }
+            params = {key: value for key, value in params.items() if value not in [None, ""]}
+            payload = self._request_json("GET", "/search.json", params=params)
+            return self._normalize_serpapi_results(payload, context)
+
         payload = self._request_json(
             "GET",
             "/search/flights",
@@ -378,6 +427,54 @@ class ExternalFlightProviderAdapter(BaseProviderAdapter):
             "status": payload.get("status", "validated_via_provider"),
         }
 
+    def _map_serpapi_travel_class(self, seat_class: Any) -> str:
+        normalized = str(seat_class or "economy").strip().lower()
+        if normalized == "business":
+            return "3"
+        if normalized in {"first", "first class"}:
+            return "4"
+        if normalized in {"premium economy", "premium_economy"}:
+            return "2"
+        return "1"
+
+    def _normalize_serpapi_results(
+        self,
+        payload: dict[str, Any],
+        context: ProviderSearchContext,
+    ) -> list[dict[str, Any]]:
+        best_flights = payload.get("best_flights") or []
+        other_flights = payload.get("other_flights") or []
+        combined = [*best_flights, *other_flights]
+        results = []
+
+        for index, item in enumerate(combined[:3], start=1):
+            flights = item.get("flights") or []
+            first_leg = flights[0] if flights else {}
+            last_leg = flights[-1] if flights else {}
+            price = item.get("price") or 0
+            results.append(
+                {
+                    "provider": "serpapi",
+                    "provider_reference": item.get("departure_token") or f"serpapi-flight-{index}",
+                    "flight_id": item.get("departure_token") or f"serpapi-flight-{index}",
+                    "flight_number": first_leg.get("flight_number") or f"SERP-{index}",
+                    "airline": first_leg.get("airline") or "Google Flights",
+                    "departure_city": first_leg.get("departure_airport", {}).get("name") or context.origin,
+                    "arrival_city": last_leg.get("arrival_airport", {}).get("name") or context.destination,
+                    "departure_time_display": first_leg.get("departure_airport", {}).get("time"),
+                    "arrival_time_display": last_leg.get("arrival_airport", {}).get("time"),
+                    "duration_display": item.get("total_duration") and f"{item.get('total_duration')} min",
+                    "price": str(price),
+                    "display_price": str(price),
+                    "price_economy": str(price),
+                    "price_business": str(price),
+                    "aircraft": first_leg.get("airplane") or "Unknown aircraft",
+                    "amenities": [],
+                }
+            )
+
+        return results
+
     def _normalize(self, item: dict[str, Any]) -> dict[str, Any]:
         price = item.get("display_price") or item.get("price") or 0
         return {
@@ -406,6 +503,18 @@ class ExternalHotelProviderAdapter(BaseProviderAdapter):
     base_url_setting = "HOTEL_PROVIDER_BASE_URL"
 
     def search(self, context: ProviderSearchContext) -> list[dict[str, Any]]:
+        if "rapidapi.com" in self._get_base_url():
+            region_payload = self._request_json(
+                "GET",
+                "/v2/regions",
+                params={
+                    "query": context.destination,
+                    "locale": getattr(settings, "HOTEL_PROVIDER_LOCALE", "es_AR"),
+                    "domain": getattr(settings, "HOTEL_PROVIDER_DOMAIN", "AR"),
+                },
+            )
+            return self._normalize_rapidapi_regions(region_payload, context)
+
         payload = self._request_json(
             "GET",
             "/search/hotels",
@@ -419,6 +528,23 @@ class ExternalHotelProviderAdapter(BaseProviderAdapter):
         return [self._normalize(item) for item in payload.get("results", [])[:3]]
 
     def revalidate(self, option: dict[str, Any], context: ProviderSearchContext) -> dict[str, Any]:
+        if "rapidapi.com" in self._get_base_url() or option.get("provider") == "rapidapi_hotels":
+            offer = self.fetch_offer(option, context)
+            offer_status = offer.get("offer_status")
+            available = offer_status not in {"sold_out", "unavailable"} or bool(
+                extract_price_value(offer.get("price_per_night") or offer.get("price_display"))
+            )
+            return {
+                "provider": option.get("provider") or "rapidapi_hotels",
+                "provider_reference": offer.get("provider_reference") or option.get("provider_reference"),
+                "available": bool(available),
+                "price_confirmed": offer.get("price_per_night") or extract_price_value(offer.get("price_display")),
+                "currency": "USD",
+                "status": "validated_via_live_offer" if available else offer_status or "unavailable",
+                "offer_status": offer_status,
+                "offer_message": offer.get("offer_message"),
+            }
+
         payload = self._request_json(
             "POST",
             "/revalidate/hotels",
@@ -435,6 +561,138 @@ class ExternalHotelProviderAdapter(BaseProviderAdapter):
             "price_confirmed": payload.get("price_confirmed"),
             "currency": payload.get("currency", "USD"),
             "status": payload.get("status", "validated_via_provider"),
+        }
+
+    def fetch_offer(self, option: dict[str, Any], context: ProviderSearchContext) -> dict[str, Any]:
+        if "rapidapi.com" in self._get_base_url():
+            hotel_id = (
+                option.get("provider_metadata", {}).get("hotel_id")
+                or option.get("provider_metadata", {}).get("gaia_id")
+                or option.get("hotel_id")
+                or option.get("provider_reference")
+            )
+            try:
+                payload = self._request_json(
+                    "GET",
+                    "/v2/hotels/rooms",
+                    params={
+                        "hotel_id": hotel_id,
+                        "checkin_date": (context.preferences or {}).get("checkin_date"),
+                        "checkout_date": (context.preferences or {}).get("checkout_date"),
+                        "adults_number": max(int(context.passengers or 1), 1),
+                        "locale": getattr(settings, "HOTEL_PROVIDER_LOCALE", "es_AR"),
+                        "domain": getattr(settings, "HOTEL_PROVIDER_DOMAIN", "AR"),
+                    },
+                )
+            except HTTPError as exc:
+                if exc.response is not None and exc.response.status_code in {404, 422}:
+                    return {
+                        **option,
+                        "pricing_pending": False,
+                        "offer_lookup_required": False,
+                        "price_display": "Offer unavailable",
+                        "offer_status": "unavailable",
+                        "offer_message": "This result cannot be priced directly. Try another hotel option.",
+                        "sold_out": True,
+                    }
+                raise
+            return self._normalize_rapidapi_offer(option, payload)
+
+        return option
+
+    def _build_headers(self) -> dict[str, str]:
+        headers = super()._build_headers()
+        if "rapidapi.com" in self._get_base_url():
+            headers.pop("Authorization", None)
+            headers.pop("X-API-Key", None)
+            headers["X-RapidAPI-Key"] = self._get_api_key()
+            headers["X-RapidAPI-Host"] = self._get_host()
+        return headers
+
+    def _normalize_rapidapi_regions(
+        self,
+        payload: dict[str, Any],
+        context: ProviderSearchContext,
+    ) -> list[dict[str, Any]]:
+        data = payload.get("data") or []
+        hotel_items = [
+            item for item in data
+            if item.get("@type") == "gaiaHotelResult" or str(item.get("type") or "").upper() == "HOTEL"
+        ]
+        prioritized = hotel_items or data
+        results = []
+        for index, item in enumerate(prioritized[:6], start=1):
+            hierarchy = item.get("hierarchyInfo") or {}
+            country = hierarchy.get("country", {}).get("name") or ""
+            hotel_id = item.get("hotelId") or item.get("gaiaId") or f"rapidapi-hotel-{index}"
+            result_type = item.get("@type")
+            is_hotel_result = result_type == "gaiaHotelResult" or str(item.get("type") or "").upper() == "HOTEL"
+            results.append(
+                {
+                    "provider": "rapidapi_hotels",
+                    "provider_reference": str(hotel_id),
+                    "hotel_id": str(hotel_id),
+                    "hotel_name": item.get("regionNames", {}).get("fullName") or item.get("caption"),
+                    "city": item.get("regionNames", {}).get("primaryDisplayName") or context.destination,
+                    "country_name": country,
+                    "price_per_night": "0",
+                    "rating": None,
+                    "description": (
+                        "Live hotel result. Check room offers after selecting this property."
+                        if is_hotel_result
+                        else "Live hotel discovery result. Check room offers after selecting this property."
+                    ),
+                    "amenity_list": [],
+                    "available_rooms": None,
+                    "is_discovery_result": not is_hotel_result,
+                    "pricing_pending": True,
+                    "price_display": "Check live offers",
+                    "offer_lookup_required": True,
+                    "provider_metadata": {
+                        "result_type": result_type,
+                        "gaia_id": item.get("gaiaId"),
+                        "hotel_id": item.get("hotelId"),
+                        "city_id": item.get("cityId"),
+                        "domain": getattr(settings, "HOTEL_PROVIDER_DOMAIN", "AR"),
+                        "locale": getattr(settings, "HOTEL_PROVIDER_LOCALE", "es_AR"),
+                    },
+                }
+            )
+        return results
+
+    def _normalize_rapidapi_offer(
+        self,
+        option: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        sticky_bar = payload.get("stickyBar") or {}
+        raw_price = sticky_bar.get("price") or sticky_bar.get("displayPrice")
+        sold_out = bool(payload.get("soldOut"))
+        error_message = (
+            (payload.get("errorMessage") or {}).get("title") or {}
+        ).get("text")
+
+        normalized_price = extract_price_value(raw_price)
+        price_display = (
+            str(normalized_price)
+            if normalized_price is not None
+            else "Sold out" if sold_out else "Check live offers"
+        )
+
+        return {
+            **option,
+            "pricing_pending": normalized_price is None and not sold_out,
+            "offer_lookup_required": False,
+            "price_per_night": str(normalized_price) if normalized_price is not None else option.get("price_per_night") or "0",
+            "price_display": price_display,
+            "offer_status": "sold_out" if sold_out else "available" if normalized_price is not None else "unavailable",
+            "offer_message": error_message or ("Live room offer loaded." if normalized_price is not None else "Offer unavailable right now."),
+            "sold_out": sold_out,
+            "provider_offer_payload": {
+                "id": payload.get("id"),
+                "soldOut": sold_out,
+                "message": error_message,
+            },
         }
 
     def _normalize(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -573,3 +831,23 @@ def apply_hotel_rating_filter(queryset, hotel_rating: str):
     if hotel_rating == "4.5+":
         return queryset.filter(rating__gte=4.5)
     return queryset
+
+
+def extract_price_value(value: Any) -> str | None:
+    if value in [None, ""]:
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return f"{Decimal(str(value)).quantize(Decimal('0.01'))}"
+
+    text = str(value)
+    import re
+
+    match = re.search(r"([0-9]+(?:[.,][0-9]{1,2})?)", text)
+    if not match:
+        return None
+
+    normalized = match.group(1).replace(",", "")
+    try:
+        return f"{Decimal(normalized).quantize(Decimal('0.01'))}"
+    except Exception:
+        return None

@@ -48,7 +48,7 @@ export default function LoyaltyDashboardClient() {
           <div className="grid gap-8 xl:grid-cols-[1.15fr_1.5fr_1fr] xl:items-center">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.24em] text-orange-300">
-                SkyNest Miles
+                SkyBook Miles
               </p>
               <h1 className="mt-4 text-4xl font-semibold tracking-tight sm:text-5xl">
                 Welcome, {loyaltyView.name}

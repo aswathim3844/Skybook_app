@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { SlidersHorizontal } from "lucide-react";
 import SiteFooter from "@/components/travel/SiteFooter";
@@ -23,30 +23,86 @@ import {
   createBooking,
   fetchCars,
   fetchFlights,
+  fetchHotelOffer,
   fetchHotels,
+  fetchReferenceHotels,
 } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 import { formatCurrency, getTripDuration } from "@/lib/mock-data";
 import { useSavedStore } from "@/lib/saved-store";
 
+function getFriendlyErrorMessage(err, fallback, context = "general") {
+  const rawMessage = String(err?.message || "").trim();
+  const lowered = rawMessage.toLowerCase();
+
+  if (!rawMessage) {
+    return fallback;
+  }
+
+  if (lowered.includes("request failed: 400")) {
+    if (context === "flight-search") {
+      return "No live flights were returned for this route and date. Try another future date or a different route.";
+    }
+    return "The search details were not accepted. Please check the selected route, dates, and filters.";
+  }
+
+  if (lowered.includes("request failed: 404")) {
+    if (context === "hotel-offer") {
+      return "This hotel cannot be priced directly right now. Try another hotel option.";
+    }
+    return "The requested option could not be found. Try choosing another result.";
+  }
+
+  if (lowered.includes("request failed: 422")) {
+    if (context === "hotel-search") {
+      return "The live hotel provider could not price this search format. Showing fallback options when available.";
+    }
+    return "The provider could not process that request. Try a different search or filter combination.";
+  }
+
+  if (lowered.includes("request failed: 500")) {
+    return "The server ran into a problem while loading this step. Please try again.";
+  }
+
+  if (lowered.includes("timed out")) {
+    return "The live provider took too long to respond. Please try again in a moment.";
+  }
+
+  if (lowered.includes("sold out")) {
+    return "This option is sold out for the selected dates. Please choose another one.";
+  }
+
+  if (lowered.includes("cannot be priced directly")) {
+    return "This result cannot be priced directly. Try another option or use the reference-priced result.";
+  }
+
+  return rawMessage || fallback;
+}
+
 export function FlightResultsScreen({ initialParams }) {
   const router = useRouter();
-  const { search, selectedFlightId, selectFlight } = useBookingSnapshot(initialParams);
+  const { search, selectedFlightId, selectedReturnFlightId, selectFlight } = useBookingSnapshot(initialParams);
+  const stepLinks = buildStepLinks(search, {
+    flightId: selectedFlightId || null,
+    returnFlightId: selectedReturnFlightId || null,
+  });
   const [flights, setFlights] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedItineraryId, setSelectedItineraryId] = useState(null);
   const [filters, setFilters] = useState({
     airline: "all",
     sortBy: "price-asc",
     departureWindow: "all",
     maxPrice: "",
+    stops: "all",
+    maxDuration: "",
   });
   const toggleSavedFlight = useSavedStore((state) => state.toggleSavedFlight);
   const isFlightSaved = useSavedStore((state) => state.isFlightSaved);
   const duration = getTripDuration(search.departure, search.returnDate);
   const tripType = search.tripType || "roundtrip";
   const multiCitySegments = search.multiCitySegments || [];
-  const hasLongStopover = hasMultiCityStopover(multiCitySegments);
   const searchFrom = search.from;
   const searchTo = search.to;
   const searchDeparture = search.departure;
@@ -58,17 +114,26 @@ export function FlightResultsScreen({ initialParams }) {
       try {
         setLoading(true);
         setError("");
-        const data = await fetchFlights({
-          from: searchFrom,
-          to: searchTo,
-          departure: searchDeparture,
-        });
+        const data =
+          tripType === "multicity"
+            ? await fetchMultiCityItineraries(multiCitySegments)
+            : await fetchFlights({
+                from: searchFrom,
+                to: searchTo,
+                departure: searchDeparture,
+              });
         if (active) {
           setFlights(data);
         }
       } catch (err) {
         if (active) {
-          setError("Could not load flights from the backend.");
+          setError(
+            getFriendlyErrorMessage(
+              err,
+              "We could not load live flights for this route.",
+              "flight-search"
+            )
+          );
         }
       } finally {
         if (active) {
@@ -81,24 +146,53 @@ export function FlightResultsScreen({ initialParams }) {
     return () => {
       active = false;
     };
-  }, [searchDeparture, searchFrom, searchTo]);
+  }, [multiCitySegments, searchDeparture, searchFrom, searchTo, tripType]);
 
-  const airlineOptions = Array.from(new Set(flights.map((flight) => flight.airline))).filter(
-    Boolean
-  );
+  const airlineOptions = Array.from(
+    new Set(
+      flights.map((flight) =>
+        tripType === "multicity"
+          ? flight.primaryAirline || flight.airline
+          : flight.airline
+      )
+    )
+  ).filter(Boolean);
 
   const activeFlights = flights
     .filter((flight) => {
-      if (filters.airline !== "all" && flight.airline !== filters.airline) {
+      const carrier = tripType === "multicity" ? flight.primaryAirline || flight.airline : flight.airline;
+      if (filters.airline !== "all" && carrier !== filters.airline) {
         return false;
       }
 
-      if (filters.maxPrice && flight.price > Number(filters.maxPrice)) {
+      const price = tripType === "multicity" ? Number(flight.totalPrice || 0) : flight.price;
+      if (filters.maxPrice && price > Number(filters.maxPrice)) {
+        return false;
+      }
+
+      const stopCount = tripType === "multicity" ? Number(flight.totalStopCount || 0) : Number(flight.stopCount || 0);
+      if (filters.stops === "nonstop" && stopCount > 0) {
+        return false;
+      }
+
+      if (filters.stops === "stops" && stopCount === 0) {
+        return false;
+      }
+
+      const durationMinutes =
+        tripType === "multicity"
+          ? Number(flight.totalDurationMinutes || 0)
+          : Number(flight.durationMinutes || 0);
+      if (filters.maxDuration && durationMinutes > Number(filters.maxDuration)) {
         return false;
       }
 
       if (filters.departureWindow !== "all") {
-        const hour = Number(flight.departure.split(":")[0] || 0);
+        const departureMinutes =
+          tripType === "multicity"
+            ? Number(flight.legs?.[0]?.departureMinutes || 0)
+            : Number(flight.departureMinutes || 0);
+        const hour = Math.floor(departureMinutes / 60);
 
         if (filters.departureWindow === "morning" && (hour < 5 || hour >= 12)) {
           return false;
@@ -114,23 +208,27 @@ export function FlightResultsScreen({ initialParams }) {
       return true;
     })
     .sort((left, right) => {
+      const leftPrice = tripType === "multicity" ? Number(left.totalPrice || 0) : left.price;
+      const rightPrice = tripType === "multicity" ? Number(right.totalPrice || 0) : right.price;
+      const leftDeparture = tripType === "multicity" ? left.legs?.[0]?.departure || "" : left.departure;
+      const rightDeparture = tripType === "multicity" ? right.legs?.[0]?.departure || "" : right.departure;
       if (filters.sortBy === "price-desc") {
-        return right.price - left.price;
+        return rightPrice - leftPrice;
       }
       if (filters.sortBy === "departure-early") {
-        return left.departure.localeCompare(right.departure);
+        return leftDeparture.localeCompare(rightDeparture);
       }
       if (filters.sortBy === "departure-late") {
-        return right.departure.localeCompare(left.departure);
+        return rightDeparture.localeCompare(leftDeparture);
       }
-      return left.price - right.price;
+      return leftPrice - rightPrice;
     });
 
   const defaultFlightId = activeFlights[0]?.id || null;
 
   return (
     <>
-      {tripType === "roundtrip" ? <BookingProgress currentStep="flights" /> : null}
+      {tripType === "roundtrip" ? <BookingProgress currentStep="flights" stepLinks={stepLinks} /> : null}
       <PageHero
         eyebrow="Flight Results"
         title={
@@ -146,97 +244,110 @@ export function FlightResultsScreen({ initialParams }) {
               : `Review flight options for ${multiCitySegments.length} connected legs.`
         }
         actions={<SecondaryLink href="/search-flights">Edit search</SecondaryLink>}
-      >
-        <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
-          {tripType === "roundtrip" ? (
-            <>
-              <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Trip length</p>
-              <p className="mt-3 text-4xl font-semibold">{duration || 1} days</p>
-              <p className="mt-3 text-sm leading-6 text-blue-100/85">
-                Flights are now loaded from your Django API and PostgreSQL database.
-              </p>
-            </>
-          ) : tripType === "oneway" ? (
-            <>
-              <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Trip type</p>
-              <p className="mt-3 text-4xl font-semibold">One way</p>
-              <p className="mt-3 text-sm leading-6 text-blue-100/85">
-                Book a single flight first, then optionally add hotel or car help.
-              </p>
-            </>
-          ) : (
-            <>
-              <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Flight legs</p>
-              <p className="mt-3 text-4xl font-semibold">{multiCitySegments.length}</p>
-              <p className="mt-3 text-sm leading-6 text-blue-100/85">
-                We can suggest hotel or car help for long stopovers between flights.
-              </p>
-            </>
-          )}
-        </div>
-      </PageHero>
+      />
 
-      <section className="mx-auto grid max-w-7xl gap-8 px-6 py-16 sm:px-8 lg:grid-cols-[1.2fr_0.8fr] lg:px-12">
+      <section className="mx-auto grid max-w-[1600px] gap-6 px-6 py-16 sm:px-8 xl:grid-cols-[240px_minmax(0,1fr)_280px] xl:px-10">
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pr-2">
+            {!loading && !error && flights.length > 0 ? (
+              <FlightResultsSidebar
+                filters={filters}
+                setFilters={setFilters}
+                airlineOptions={airlineOptions}
+                tripType={tripType}
+                flights={activeFlights}
+                search={search}
+              />
+            ) : null}
+          </div>
+        </aside>
+
         <div>
-      <PageSection eyebrow="Results" title="Available flights" className="px-0 py-0">
-        {loading ? <InfoPanel text="Loading flights from database..." /> : null}
-        {error ? <ErrorPanel text={error} /> : null}
-        {!loading && !error && flights.length > 0 ? (
-          <FlightFilterBar
-            filters={filters}
-            setFilters={setFilters}
-            airlineOptions={airlineOptions}
-          />
-        ) : null}
-        {!loading && !error && activeFlights.length === 0 ? (
-          <InfoPanel text="No flights matched your current filters. Try another airline, price, or departure window." />
-        ) : null}
-        <div className="space-y-4">
-          {activeFlights.map((flight) => (
-            <FlightCard
-              key={flight.id}
-              flight={flight}
-              buttonLabel={selectedFlightId === flight.id ? "Selected" : "Select flight"}
-              isSaved={isFlightSaved(flight.id)}
-              onToggleSave={() => toggleSavedFlight(flight)}
-              onSelect={() => {
-                selectFlight(flight);
-                if (tripType === "roundtrip") {
-                  router.push(
-                    `/hotel-selection?${buildBookingQuery({
-                      search,
-                      flightId: flight.id,
-                    })}`
-                  );
-                  return;
-                }
+          <PageSection
+            eyebrow="Results"
+            title={tripType === "multicity" ? "Available itineraries" : "Available flights"}
+            className="px-0 py-0"
+          >
+            {loading ? <InfoPanel text="Loading..." /> : null}
+            {error ? <ErrorPanel text={error} /> : null}
+            {!loading && !error && activeFlights.length === 0 ? (
+              <InfoPanel text={tripType === "multicity" ? "No itinerary bundles matched your current filters. Try another airline, price, or departure window." : "No flights matched your current filters. Try another airline, price, or departure window."} />
+            ) : null}
+            <div className="space-y-4">
+              {tripType === "multicity"
+                ? activeFlights.map((itinerary, index) => (
+                    <MultiCityItineraryCard
+                      key={itinerary.id}
+                      itinerary={itinerary}
+                      index={index}
+                      selected={selectedItineraryId === itinerary.id}
+                      onSelect={() => {
+                        setSelectedItineraryId(itinerary.id);
+                        selectFlight(mapItineraryBudgetFlight(itinerary));
+                        router.push(
+                          `/payment?${buildBookingQuery({
+                            search,
+                            flightId: itinerary.id,
+                          })}`
+                        );
+                      }}
+                    />
+                  ))
+                : activeFlights.map((flight) => (
+                    <FlightCard
+                      key={flight.id}
+                      flight={flight}
+                      buttonLabel={selectedFlightId === flight.id ? "Selected" : "Select flight"}
+                      isSaved={isFlightSaved(flight.id)}
+                      onToggleSave={() => toggleSavedFlight(flight)}
+                      onSelect={() => {
+                        selectFlight(flight);
+                        if (tripType === "roundtrip") {
+                          router.push(
+                            `/return-flight-selection?${buildBookingQuery({
+                              search,
+                              flightId: flight.id,
+                            })}`
+                          );
+                          return;
+                        }
 
-                router.push(
-                  `/booking-summary?${buildBookingQuery({
-                    search,
-                    flightId: flight.id,
-                  })}`
-                );
-              }}
+                        router.push(
+                          `/booking-summary?${buildBookingQuery({
+                            search,
+                            flightId: flight.id,
+                          })}`
+                        );
+                      }}
+                    />
+                  ))}
+            </div>
+          </PageSection>
+        </div>
+
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pl-2">
+            <BudgetSidebar
+              compact
+              tripType={tripType}
+              flight={
+                tripType === "multicity"
+                  ? mapItineraryBudgetFlight(activeFlights.find((itinerary) => itinerary.id === selectedItineraryId) || activeFlights[0])
+                  : activeFlights.find((flight) => flight.id === selectedFlightId) || activeFlights[0]
+              }
+              hotel={null}
+              car={null}
+              duration={duration}
             />
-          ))}
-        </div>
-      </PageSection>
-        </div>
-
-        <BudgetSidebar
-          tripType={tripType}
-          flight={activeFlights.find((flight) => flight.id === selectedFlightId) || activeFlights[0]}
-          hotel={null}
-          car={null}
-          duration={duration}
-        />
+          </div>
+        </aside>
       </section>
 
       {tripType === "roundtrip" && duration > 1 ? (
         <TripRecommendationsSection
           search={search}
           selectedFlightId={selectedFlightId || defaultFlightId}
+          selectedReturnFlightId={selectedReturnFlightId || null}
           selectedFlight={
             activeFlights.find((flight) => flight.id === (selectedFlightId || defaultFlightId)) ||
             activeFlights[0] ||
@@ -256,19 +367,210 @@ export function FlightResultsScreen({ initialParams }) {
         </PageSection>
       ) : null}
 
-      {tripType === "multicity" ? (
-        <PageSection
-          eyebrow="Stopover Help"
-          title={hasLongStopover ? "Long stopover detected" : "Connected itinerary support"}
-          description={
-            hasLongStopover
-              ? "There is a long gap between flights. We can help with a hotel or local car during the stopover."
-              : "If you want, you can still add hotel or car help for any city in the route."
-          }
-        >
-          <MultiCityPrompt search={search} />
-        </PageSection>
-      ) : null}
+      <SiteFooter />
+    </>
+  );
+}
+
+export function ReturnFlightSelectionScreen({ initialParams }) {
+  const router = useRouter();
+  const {
+    search,
+    selectedFlightId,
+    selectedReturnFlightId,
+    selectedFlight,
+    selectedReturnFlight,
+    selectReturnFlight,
+  } = useBookingSnapshot(initialParams);
+  const stepLinks = buildStepLinks(search, {
+    flightId: selectedFlightId || selectedFlight?.id || null,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id || null,
+  });
+  const [flights, setFlights] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [filters, setFilters] = useState({
+    airline: "all",
+    sortBy: "price-asc",
+    departureWindow: "all",
+    maxPrice: "",
+    stops: "all",
+    maxDuration: "",
+  });
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadReturnFlights() {
+      try {
+        setLoading(true);
+        setError("");
+        const data = await fetchFlights({
+          from: search.to,
+          to: search.from,
+          departure: search.returnDate,
+        });
+        if (active) {
+          setFlights(data);
+        }
+      } catch (err) {
+        if (active) {
+          setError(
+            getFriendlyErrorMessage(
+              err,
+              "We could not load return flights for this route.",
+              "flight-search"
+            )
+          );
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadReturnFlights();
+    return () => {
+      active = false;
+    };
+  }, [search.from, search.returnDate, search.to]);
+
+  const airlineOptions = Array.from(new Set(flights.map((flight) => flight.airline))).filter(Boolean);
+  const activeFlights = flights
+    .filter((flight) => {
+      if (filters.airline !== "all" && flight.airline !== filters.airline) {
+        return false;
+      }
+      if (filters.maxPrice && flight.price > Number(filters.maxPrice)) {
+        return false;
+      }
+      if (filters.stops === "nonstop" && Number(flight.stopCount || 0) > 0) {
+        return false;
+      }
+      if (filters.stops === "stops" && Number(flight.stopCount || 0) === 0) {
+        return false;
+      }
+      if (filters.maxDuration && Number(flight.durationMinutes || 0) > Number(filters.maxDuration)) {
+        return false;
+      }
+      if (filters.departureWindow !== "all") {
+        const hour = Math.floor(Number(flight.departureMinutes || 0) / 60);
+        if (filters.departureWindow === "morning" && (hour < 5 || hour >= 12)) {
+          return false;
+        }
+        if (filters.departureWindow === "afternoon" && (hour < 12 || hour >= 18)) {
+          return false;
+        }
+        if (filters.departureWindow === "evening" && (hour < 18 || hour > 23)) {
+          return false;
+        }
+      }
+      return true;
+    })
+    .sort((left, right) => {
+      if (filters.sortBy === "price-desc") {
+        return right.price - left.price;
+      }
+      if (filters.sortBy === "departure-early") {
+        return left.departure.localeCompare(right.departure);
+      }
+      if (filters.sortBy === "departure-late") {
+        return right.departure.localeCompare(left.departure);
+      }
+      return left.price - right.price;
+    });
+
+  return (
+    <>
+      <BookingProgress currentStep="flights" stepLinks={stepLinks} />
+      <PageHero
+        eyebrow="Return Flight"
+        title={`Return flights from ${search.to} to ${search.from}`}
+        description={`Choose the return leg for ${search.returnDate}. This keeps the round-trip flow complete before hotel and car selection.`}
+        actions={<SecondaryLink href={`/flight-results?${buildBookingQuery({ search, flightId: selectedFlightId || selectedFlight?.id })}`}>Back to outbound flights</SecondaryLink>}
+      >
+        <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
+          <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Outbound already selected</p>
+          <p className="mt-3 text-2xl font-semibold">
+            {selectedFlight?.airline || "Selected flight"} {selectedFlight?.code || ""}
+          </p>
+          <p className="mt-2 text-sm text-blue-100/85">
+            Now pick the return leg so pricing and booking stay consistent.
+          </p>
+        </div>
+      </PageHero>
+
+      <section className="mx-auto grid max-w-[1600px] gap-6 px-6 py-16 sm:px-8 xl:grid-cols-[240px_minmax(0,1fr)_280px] xl:px-10">
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pr-2">
+            {!loading && !error && flights.length > 0 ? (
+              <FlightResultsSidebar
+                filters={filters}
+                setFilters={setFilters}
+                airlineOptions={airlineOptions}
+                tripType="roundtrip"
+                flights={activeFlights}
+                search={{
+                  ...search,
+                  from: search.to,
+                  to: search.from,
+                  departure: search.returnDate,
+                }}
+              />
+            ) : null}
+          </div>
+        </aside>
+
+        <div>
+          <PageSection eyebrow="Results" title="Available return flights" className="px-0 py-0">
+            {loading ? <InfoPanel text="Loading..." /> : null}
+            {error ? <ErrorPanel text={error} /> : null}
+            {!loading && !error && activeFlights.length === 0 ? (
+              <InfoPanel text="No return flights matched your current filters. Try another airline, price, or departure window." />
+            ) : null}
+            <div className="space-y-4">
+              {activeFlights.map((flight) => (
+                <FlightCard
+                  key={flight.id}
+                  flight={flight}
+                  buttonLabel={selectedReturnFlightId === flight.id ? "Selected" : "Select return"}
+                  onSelect={() => {
+                    selectReturnFlight(flight);
+                    router.push(
+                      `/hotel-selection?${buildBookingQuery({
+                        search,
+                        flightId: selectedFlightId || selectedFlight?.id,
+                        returnFlightId: flight.id,
+                      })}`
+                    );
+                  }}
+                />
+              ))}
+            </div>
+          </PageSection>
+        </div>
+
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pl-2">
+            <BudgetSidebar
+              compact
+              tripType="roundtrip"
+              flight={{
+                ...(selectedFlight || {}),
+                price:
+                  (selectedFlight?.price || 0) +
+                  (activeFlights.find((flight) => flight.id === selectedReturnFlightId)?.price ||
+                    activeFlights[0]?.price ||
+                    0),
+              }}
+              hotel={null}
+              car={null}
+              duration={Math.max(getTripDuration(search.departure, search.returnDate), 1)}
+            />
+          </div>
+        </aside>
+      </section>
 
       <SiteFooter />
     </>
@@ -277,11 +579,32 @@ export function FlightResultsScreen({ initialParams }) {
 
 export function HotelSelectionScreen({ initialParams }) {
   const router = useRouter();
-  const { search, selectedFlightId, selectedHotelId, selectHotel, selectedFlight } =
+  const {
+    search,
+    selectedFlightId,
+    selectedReturnFlightId,
+    selectedHotelId,
+    selectHotel,
+    selectedFlight,
+    selectedReturnFlight,
+  } =
     useBookingSnapshot(initialParams);
+  const stepLinks = buildStepLinks(search, {
+    flightId: selectedFlightId || selectedFlight?.id || null,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id || null,
+    hotelId: selectedHotelId || null,
+  });
   const [hotels, setHotels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [hotelOfferLoadingId, setHotelOfferLoadingId] = useState(null);
+  const [pricingNotice, setPricingNotice] = useState("");
+  const [filters, setFilters] = useState({
+    minRating: "any",
+    maxPrice: "",
+    priceSource: "all",
+    sortBy: "recommended",
+  });
   const toggleSavedHotel = useSavedStore((state) => state.toggleSavedHotel);
   const isHotelSaved = useSavedStore((state) => state.isHotelSaved);
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
@@ -295,15 +618,97 @@ export function HotelSelectionScreen({ initialParams }) {
       try {
         setLoading(true);
         setError("");
+        setPricingNotice("");
         const data = await fetchHotels({
           to: destinationCity,
+          passengers: search.passengers,
         });
+        const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
+        const fallbackHotel = fallbackHotels[0] || null;
+        const candidates = data.slice(0, 4);
+        const pricedHotels = await Promise.all(
+          candidates.map(async (hotel) => {
+            try {
+              const offer = await fetchHotelOffer({
+                hotel: {
+                  hotel_id: hotel.id,
+                  hotel_name: hotel.name,
+                  city: hotel.location?.split(",")[0] || destinationCity,
+                  country_name: hotel.location?.split(",").slice(1).join(",").trim(),
+                  provider_reference: hotel.id,
+                  provider_metadata: hotel.providerMetadata || {},
+                },
+                city: destinationCity,
+                checkin_date: search.departure,
+                checkout_date: search.returnDate,
+                adults_number: extractPassengerCount(search.passengers),
+              });
+
+              if (offer.sold_out && fallbackHotel) {
+                return {
+                  ...hotel,
+                  pricePerDay: fallbackHotel.pricePerDay,
+                  pricingPending: false,
+                  priceLabel: "Reference price",
+                  details: "Live offer unavailable. Showing reference hotel pricing from local inventory.",
+                  isFallbackPrice: true,
+                  sourceLabel: "Reference price",
+                };
+              }
+
+              return {
+                ...hotel,
+                pricePerDay: Number(offer.price_per_night || hotel.pricePerDay || 0),
+                pricingPending: Boolean(offer.pricing_pending),
+                priceLabel: offer.price_display || hotel.priceLabel || null,
+                details: offer.offer_message || hotel.details,
+                soldOut: Boolean(offer.sold_out),
+                isFallbackPrice: false,
+                sourceLabel: "Live price",
+              };
+            } catch {
+              if (!fallbackHotel) {
+                return hotel;
+              }
+
+              return {
+                ...hotel,
+                pricePerDay: fallbackHotel.pricePerDay,
+                pricingPending: false,
+                priceLabel: "Reference price",
+                details: "Live offer unavailable. Showing reference hotel pricing from local inventory.",
+                isFallbackPrice: true,
+                sourceLabel: "Reference price",
+              };
+            }
+          })
+        );
+
+        const remainingHotels = data.slice(candidates.length);
+        const nextHotels = [...pricedHotels, ...remainingHotels];
+
         if (active) {
-          setHotels(data);
+          setHotels(nextHotels);
+          if (pricedHotels.some((hotel) => hotel.isFallbackPrice)) {
+            setPricingNotice("Some hotel prices are live. Others are reference prices from local inventory when live offers were unavailable.");
+          }
         }
       } catch (err) {
         if (active) {
-          setError("Could not load hotels from the backend.");
+          try {
+            const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
+            setHotels(fallbackHotels);
+            setPricingNotice("Live hotel pricing could not be preloaded. Showing reference hotel pricing from local inventory.");
+            setError("");
+          } catch {
+            setError(
+              getFriendlyErrorMessage(
+                err,
+                "We could not load hotels for this destination.",
+                "hotel-search"
+              )
+            );
+          }
         }
       } finally {
         if (active) {
@@ -316,14 +721,56 @@ export function HotelSelectionScreen({ initialParams }) {
     return () => {
       active = false;
     };
-  }, [destinationCity]);
+  }, [destinationCity, search.departure, search.passengers, search.returnDate]);
 
-  const activeHotel = hotels.find((hotel) => hotel.id === selectedHotelId) || hotels[0];
+  const displayHotels = (() => {
+    const directHotels = hotels.filter((hotel) => !hotel.isDiscoveryResult);
+    return directHotels.length > 0 ? directHotels : hotels;
+  })();
+  const filteredHotels = useMemo(
+    () =>
+      displayHotels
+        .filter((hotel) => {
+          if (filters.minRating !== "any" && Number(hotel.rating || 0) < Number(filters.minRating)) {
+            return false;
+          }
+
+          if (!hotel.pricingPending && filters.maxPrice && Number(hotel.pricePerDay || 0) > Number(filters.maxPrice)) {
+            return false;
+          }
+
+          if (filters.priceSource === "live" && hotel.sourceLabel !== "Live price") {
+            return false;
+          }
+          if (filters.priceSource === "reference" && hotel.sourceLabel !== "Reference price") {
+            return false;
+          }
+          if (filters.priceSource === "pending" && hotel.sourceLabel !== "Price pending") {
+            return false;
+          }
+
+          return true;
+        })
+        .sort((left, right) => {
+          if (filters.sortBy === "price-asc") {
+            return Number(left.pricePerDay || Number.MAX_SAFE_INTEGER) - Number(right.pricePerDay || Number.MAX_SAFE_INTEGER);
+          }
+          if (filters.sortBy === "price-desc") {
+            return Number(right.pricePerDay || 0) - Number(left.pricePerDay || 0);
+          }
+          if (filters.sortBy === "rating-desc") {
+            return Number(right.rating || 0) - Number(left.rating || 0);
+          }
+          return 0;
+        }),
+    [displayHotels, filters]
+  );
+  const activeHotel = filteredHotels.find((hotel) => hotel.id === selectedHotelId) || filteredHotels[0] || null;
   const safeFlight = selectedFlight;
 
   return (
     <>
-      {tripType === "roundtrip" ? <BookingProgress currentStep="hotel" /> : null}
+      {tripType === "roundtrip" ? <BookingProgress currentStep="hotel" stepLinks={stepLinks} /> : null}
       <PageHero
         eyebrow="Hotel Selection"
         title="Choose a hotel to complete the trip"
@@ -340,31 +787,128 @@ export function HotelSelectionScreen({ initialParams }) {
         </div>
       </PageHero>
 
-      <section className="mx-auto grid max-w-7xl gap-8 px-6 py-16 sm:px-8 lg:grid-cols-[1.2fr_0.8fr] lg:px-12">
+      <section className="mx-auto grid max-w-[1600px] gap-6 px-6 py-16 sm:px-8 xl:grid-cols-[240px_minmax(0,1fr)_280px] xl:px-10">
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pr-2">
+            {!loading && !error && displayHotels.length > 0 ? (
+              <HotelFilterBar filters={filters} setFilters={setFilters} />
+            ) : null}
+          </div>
+        </aside>
+
         <div>
-          <PageSection title="Recommended Hotels" className="px-0 py-0">
-            {loading ? <InfoPanel text="Loading hotels from database..." /> : null}
+          <PageSection eyebrow="Results" title="Recommended Hotels" className="px-0 py-0">
+            {loading ? <InfoPanel text="Loading..." /> : null}
             {error ? <ErrorPanel text={error} /> : null}
-            {!loading && !error && hotels.length === 0 ? (
+            {!loading && !error && displayHotels.length === 0 ? (
               <InfoPanel text="No hotels matched this city in your database." />
             ) : null}
+            {!loading && !error && displayHotels.length > 0 && displayHotels.length !== hotels.length ? (
+              <InfoPanel text="Showing hotel entries that are more likely to support live room pricing." />
+            ) : null}
+            {!loading && !error && filteredHotels.length === 0 && displayHotels.length > 0 ? (
+              <InfoPanel text="No hotels matched your current filters. Try a lower rating, a higher max price, or a different price source." />
+            ) : null}
             <div className="grid gap-5 md:grid-cols-2">
-              {hotels.map((hotel) => (
+              {filteredHotels.map((hotel) => (
                 <ProductCard
                   key={hotel.id}
                   item={hotel}
-                  buttonLabel={selectedHotelId === hotel.id ? "Selected" : "Select hotel"}
+                  buttonLabel={
+                    hotelOfferLoadingId === hotel.id
+                      ? "Checking price..."
+                      : selectedHotelId === hotel.id
+                        ? "Selected"
+                        : "Select hotel"
+                  }
                   isSaved={isHotelSaved(hotel.id)}
                   onToggleSave={() => toggleSavedHotel(hotel)}
-                  onSelect={() => {
-                    selectHotel(hotel);
-                    router.push(
-                      `/car-rental?${buildBookingQuery({
-                        search,
-                        flightId: selectedFlightId || safeFlight.id,
-                        hotelId: hotel.id,
-                      })}`
-                    );
+                  onSelect={async () => {
+                    setError("");
+                    setHotelOfferLoadingId(hotel.id);
+
+                    try {
+                      const offer = await fetchHotelOffer({
+                        hotel: {
+                          hotel_id: hotel.id,
+                          hotel_name: hotel.name,
+                          city: hotel.location?.split(",")[0] || destinationCity,
+                          country_name: hotel.location?.split(",").slice(1).join(",").trim(),
+                          provider_reference: hotel.id,
+                          provider_metadata: hotel.providerMetadata || {},
+                        },
+                        city: destinationCity,
+                        checkin_date: search.departure,
+                        checkout_date: search.returnDate,
+                        adults_number: extractPassengerCount(search.passengers),
+                      });
+
+                      const normalizedHotel = {
+                        ...hotel,
+                        pricePerDay: Number(offer.price_per_night || hotel.pricePerDay || 0),
+                        pricingPending: Boolean(offer.pricing_pending),
+                        priceLabel: offer.price_display || hotel.priceLabel || null,
+                        details: offer.offer_message || hotel.details,
+                        soldOut: Boolean(offer.sold_out),
+                        sourceLabel: offer.sold_out ? hotel.sourceLabel : "Live price",
+                      };
+
+                      if (offer.sold_out) {
+                        const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
+                        const fallbackHotel = fallbackHotels[0];
+
+                        if (!fallbackHotel) {
+                          setError(
+                            getFriendlyErrorMessage(
+                              { message: offer.offer_message || "" },
+                              "This hotel does not have rooms for the selected dates.",
+                              "hotel-offer"
+                            )
+                          );
+                          return;
+                        }
+
+                        const normalizedHotel = {
+                          ...fallbackHotel,
+                          details: "Live offer unavailable. Showing reference hotel pricing from local inventory.",
+                          priceLabel: "Reference price",
+                          pricingPending: false,
+                          providerMetadata: hotel.providerMetadata || null,
+                          sourceLabel: "Reference price",
+                        };
+
+                        selectHotel(normalizedHotel);
+                        router.push(
+                          `/car-rental?${buildBookingQuery({
+                            search,
+                            flightId: selectedFlightId || safeFlight.id,
+                            returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+                            hotelId: normalizedHotel.id,
+                          })}`
+                        );
+                        return;
+                      }
+
+                      selectHotel(normalizedHotel);
+                      router.push(
+                        `/car-rental?${buildBookingQuery({
+                          search,
+                          flightId: selectedFlightId || safeFlight.id,
+                          returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+                          hotelId: hotel.id,
+                        })}`
+                      );
+                    } catch (err) {
+                      setError(
+                        getFriendlyErrorMessage(
+                          err,
+                          "We could not confirm a live hotel price for this option.",
+                          "hotel-offer"
+                        )
+                      );
+                    } finally {
+                      setHotelOfferLoadingId(null);
+                    }
                   }}
                 />
               ))}
@@ -372,18 +916,18 @@ export function HotelSelectionScreen({ initialParams }) {
           </PageSection>
         </div>
 
-        <SummaryPanel
-          flight={safeFlight}
-          hotel={activeHotel}
-          total={safeFlight.price + (activeHotel?.pricePerDay || 0) * duration}
-          ctaHref={`/car-rental?${buildBookingQuery({
-            search,
-            flightId: selectedFlightId || safeFlight.id,
-            hotelId: selectedHotelId || activeHotel?.id,
-          })}`}
-          ctaLabel="Continue to cars"
-          description="This summary now reflects the real hotel list returned by the backend."
-        />
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pl-2">
+            <BudgetSidebar
+              compact
+              tripType={tripType}
+              flight={safeFlight}
+              hotel={activeHotel}
+              car={null}
+              duration={duration}
+            />
+          </div>
+        </aside>
       </section>
 
       <SiteFooter />
@@ -396,20 +940,35 @@ export function CarRentalScreen({ initialParams }) {
   const {
     search,
     selectedFlightId,
+    selectedReturnFlightId,
     selectedHotelId,
     selectedCarId,
     selectCar,
     selectedFlight,
+    selectedReturnFlight,
     selectedHotel,
   } = useBookingSnapshot(initialParams);
   const [cars, setCars] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [filters, setFilters] = useState({
+    carType: "all",
+    seats: "all",
+    availability: "available",
+    maxPrice: "",
+    sortBy: "price-asc",
+  });
   const toggleSavedCar = useSavedStore((state) => state.toggleSavedCar);
   const isCarSaved = useSavedStore((state) => state.isCarSaved);
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const tripType = search.tripType || "roundtrip";
   const rentalCity = search.to;
+  const stepLinks = buildStepLinks(search, {
+    flightId: selectedFlightId || selectedFlight?.id || null,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id || null,
+    hotelId: selectedHotelId || selectedHotel?.id || null,
+    carId: selectedCarId || null,
+  });
 
   useEffect(() => {
     let active = true;
@@ -426,7 +985,13 @@ export function CarRentalScreen({ initialParams }) {
         }
       } catch (err) {
         if (active) {
-          setError("Could not load cars from the backend.");
+          setError(
+            getFriendlyErrorMessage(
+              err,
+              "We could not load rental cars for this destination.",
+              "car-search"
+            )
+          );
         }
       } finally {
         if (active) {
@@ -441,15 +1006,51 @@ export function CarRentalScreen({ initialParams }) {
     };
   }, [rentalCity]);
 
-  const activeCar = cars.find((car) => car.id === selectedCarId) || cars[0];
+  const carTypeOptions = Array.from(new Set(cars.map((car) => car.carType).filter(Boolean))).sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const filteredCars = useMemo(
+    () =>
+      cars
+        .filter((car) => {
+          if (filters.carType !== "all" && car.carType !== filters.carType) {
+            return false;
+          }
+          if (filters.seats !== "all" && Number(car.seats || 0) < Number(filters.seats)) {
+            return false;
+          }
+          if (filters.availability === "available" && !car.availability) {
+            return false;
+          }
+          if (filters.availability === "unavailable" && car.availability) {
+            return false;
+          }
+          if (filters.maxPrice && Number(car.pricePerDay || 0) > Number(filters.maxPrice)) {
+            return false;
+          }
+          return true;
+        })
+        .sort((left, right) => {
+          if (filters.sortBy === "price-desc") {
+            return Number(right.pricePerDay || 0) - Number(left.pricePerDay || 0);
+          }
+          if (filters.sortBy === "seats-desc") {
+            return Number(right.seats || 0) - Number(left.seats || 0);
+          }
+          return Number(left.pricePerDay || 0) - Number(right.pricePerDay || 0);
+        }),
+    [cars, filters]
+  );
+  const activeCar = filteredCars.find((car) => car.id === selectedCarId) || filteredCars[0] || null;
   const total =
-    selectedFlight.price +
+    (selectedFlight?.price || 0) +
+    (selectedReturnFlight?.price || 0) +
     (selectedHotel?.pricePerDay || 0) * duration +
     (activeCar?.pricePerDay || 0) * duration;
 
   return (
     <>
-      {tripType === "roundtrip" ? <BookingProgress currentStep="car" /> : null}
+      {tripType === "roundtrip" ? <BookingProgress currentStep="car" stepLinks={stepLinks} /> : null}
       <PageHero
         eyebrow="Car Rental"
         title="Add a rental car if the trip needs local mobility"
@@ -464,16 +1065,27 @@ export function CarRentalScreen({ initialParams }) {
         </div>
       </PageHero>
 
-      <section className="mx-auto grid max-w-7xl gap-8 px-6 py-16 sm:px-8 lg:grid-cols-[1.2fr_0.8fr] lg:px-12">
+      <section className="mx-auto grid max-w-[1600px] gap-6 px-6 py-16 sm:px-8 xl:grid-cols-[240px_minmax(0,1fr)_280px] xl:px-10">
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pr-2">
+            {!loading && !error && cars.length > 0 ? (
+              <CarFilterBar filters={filters} setFilters={setFilters} carTypeOptions={carTypeOptions} />
+            ) : null}
+          </div>
+        </aside>
+
         <div>
-          <PageSection title="Available Rental Cars" className="px-0 py-0">
-            {loading ? <InfoPanel text="Loading cars from database..." /> : null}
+          <PageSection eyebrow="Results" title="Available Rental Cars" className="px-0 py-0">
+            {loading ? <InfoPanel text="Loading..." /> : null}
             {error ? <ErrorPanel text={error} /> : null}
             {!loading && !error && cars.length === 0 ? (
               <InfoPanel text="No cars matched this city in your database." />
             ) : null}
+            {!loading && !error && filteredCars.length === 0 && cars.length > 0 ? (
+              <InfoPanel text="No cars matched your current filters. Try another car type, seat count, or price range." />
+            ) : null}
             <div className="grid gap-5 md:grid-cols-2">
-              {cars.map((item) => (
+              {filteredCars.map((item) => (
                 <ProductCard
                   key={item.id}
                   item={item}
@@ -486,6 +1098,7 @@ export function CarRentalScreen({ initialParams }) {
                       `/booking-summary?${buildBookingQuery({
                         search,
                         flightId: selectedFlightId || selectedFlight.id,
+                        returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
                         hotelId: selectedHotelId || selectedHotel?.id,
                         carId: item.id,
                       })}`
@@ -497,19 +1110,18 @@ export function CarRentalScreen({ initialParams }) {
           </PageSection>
         </div>
 
-        <SummaryPanel
-          flight={selectedFlight}
-          hotel={selectedHotel}
-          car={activeCar}
-          total={total}
-          ctaHref={`/booking-summary?${buildBookingQuery({
-            search,
-            flightId: selectedFlightId || selectedFlight.id,
-            hotelId: selectedHotelId || selectedHotel?.id,
-            carId: selectedCarId || activeCar?.id,
-          })}`}
-          ctaLabel="Review booking"
-        />
+        <aside className="xl:sticky xl:top-20 xl:self-start">
+          <div className="xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pl-2">
+            <BudgetSidebar
+              compact
+              tripType={tripType}
+              flight={selectedFlight}
+              hotel={selectedHotel}
+              car={activeCar}
+              duration={duration}
+            />
+          </div>
+        </aside>
       </section>
 
       <SiteFooter />
@@ -521,21 +1133,29 @@ export function BookingSummaryScreen({ initialParams }) {
   const {
     search,
     selectedFlightId,
+    selectedReturnFlightId,
     selectedHotelId,
     selectedCarId,
     selectedFlight,
+    selectedReturnFlight,
     selectedHotel,
     selectedCar,
   } = useBookingSnapshot(initialParams);
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const hotelTotal = (selectedHotel?.pricePerDay || 0) * duration;
   const carTotal = (selectedCar?.pricePerDay || 0) * duration;
-  const total = selectedFlight.price + hotelTotal + carTotal;
+  const total = (selectedFlight?.price || 0) + (selectedReturnFlight?.price || 0) + hotelTotal + carTotal;
   const tripType = search.tripType || "roundtrip";
+  const stepLinks = buildStepLinks(search, {
+    flightId: selectedFlightId || selectedFlight?.id || null,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id || null,
+    hotelId: selectedHotelId || selectedHotel?.id || null,
+    carId: selectedCarId || selectedCar?.id || null,
+  });
 
   return (
     <>
-      {tripType === "roundtrip" ? <BookingProgress currentStep="summary" /> : null}
+      {tripType === "roundtrip" ? <BookingProgress currentStep="summary" stepLinks={stepLinks} /> : null}
       <PageHero
         eyebrow="Booking Summary"
         title="Review the final package before payment"
@@ -543,12 +1163,15 @@ export function BookingSummaryScreen({ initialParams }) {
       >
         <SummaryPanel
           flight={selectedFlight}
+          returnFlight={selectedReturnFlight}
           hotel={selectedHotel}
           car={selectedCar}
+          duration={duration}
           total={total}
           ctaHref={`/payment?${buildBookingQuery({
             search,
             flightId: selectedFlightId || selectedFlight.id,
+            returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
             hotelId: selectedHotelId || selectedHotel?.id,
             carId: selectedCarId || selectedCar?.id,
           })}`}
@@ -558,12 +1181,27 @@ export function BookingSummaryScreen({ initialParams }) {
         />
       </PageHero>
 
-      <section className="mx-auto grid max-w-7xl gap-6 px-6 py-16 sm:px-8 lg:grid-cols-3 lg:px-12">
+      <section
+        className={`mx-auto grid max-w-7xl gap-6 px-6 py-16 sm:px-8 lg:px-12 ${
+          tripType === "roundtrip" ? "lg:grid-cols-4" : "lg:grid-cols-3"
+        }`}
+      >
         <SummaryCard
-          label="Selected Flight"
+          label="Outbound Flight"
           title={selectedFlight.airline}
           detail={`${selectedFlight.departure} to ${selectedFlight.arrival} | ${selectedFlight.duration}`}
         />
+        {tripType === "roundtrip" ? (
+          <SummaryCard
+            label="Return Flight"
+            title={selectedReturnFlight?.airline || "No return flight"}
+            detail={
+              selectedReturnFlight
+                ? `${selectedReturnFlight.departure} to ${selectedReturnFlight.arrival} | ${selectedReturnFlight.duration}`
+                : "Add a return flight before checkout"
+            }
+          />
+        ) : null}
         <SummaryCard
           label="Selected Hotel"
           title={selectedHotel?.name || "No hotel"}
@@ -586,7 +1224,12 @@ export function PaymentScreen({ initialParams }) {
   const customer = useAuthStore((state) => state.customer);
   const {
     search,
+    selectedFlightId,
+    selectedReturnFlightId,
+    selectedHotelId,
+    selectedCarId,
     selectedFlight,
+    selectedReturnFlight,
     selectedHotel,
     selectedCar,
     resetBooking,
@@ -594,9 +1237,20 @@ export function PaymentScreen({ initialParams }) {
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const tripType = search.tripType || "roundtrip";
   const total =
-    selectedFlight.price +
-    (selectedHotel?.pricePerDay || 0) * duration +
-    (selectedCar?.pricePerDay || 0) * duration;
+    tripType === "hotel-only"
+      ? (selectedHotel?.pricePerDay || 0) * duration
+      : tripType === "car-only"
+        ? (selectedCar?.pricePerDay || 0) * duration
+        : (selectedFlight?.price || 0) +
+          (selectedReturnFlight?.price || 0) +
+          (selectedHotel?.pricePerDay || 0) * duration +
+          (selectedCar?.pricePerDay || 0) * duration;
+  const stepLinks = buildStepLinks(search, {
+    flightId: selectedFlightId || selectedFlight?.id || null,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id || null,
+    hotelId: selectedHotelId || selectedHotel?.id || null,
+    carId: selectedCarId || selectedCar?.id || null,
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [paymentForm, setPaymentForm] = useState({
@@ -607,6 +1261,13 @@ export function PaymentScreen({ initialParams }) {
     billingAddress: "",
   });
   const [fieldErrors, setFieldErrors] = useState({});
+  const hasBookingSelection = Boolean(
+    ((tripType === "hotel-only" && selectedHotelId) ||
+      (tripType === "car-only" && selectedCarId) ||
+      (selectedFlightId &&
+        (tripType === "multicity" || (selectedHotelId && selectedCarId)))) &&
+      (tripType !== "roundtrip" || selectedReturnFlightId)
+  );
 
   function handleFieldChange(field, value) {
     setPaymentForm((current) => ({
@@ -656,25 +1317,54 @@ export function PaymentScreen({ initialParams }) {
       return;
     }
 
+    if (!hasBookingSelection) {
+      setError(
+        tripType === "multicity"
+          ? "This payment page is missing the selected itinerary. Please go back to flight results and choose one again."
+          : tripType === "hotel-only"
+            ? "This payment page is missing the selected hotel. Please go back and choose a hotel again."
+            : tripType === "car-only"
+              ? "This payment page is missing the selected car. Please go back and choose a car again."
+            : "This payment page is missing the selected flight, hotel, or car. Please go back to the booking summary and reopen payment."
+      );
+      return;
+    }
+
     try {
       setSubmitting(true);
       setError("");
       await createBooking({
         customer: customer?.customer_id || null,
-        flight: selectedFlight?.id,
-        hotel: selectedHotel?.id,
-        car: selectedCar?.id,
+        name: customer?.name || "",
+        email: customer?.email || "",
+        flight: tripType === "hotel-only" || tripType === "car-only" ? null : selectedFlightId,
+        return_flight: tripType === "roundtrip" ? selectedReturnFlightId : null,
+        hotel: tripType === "car-only" ? null : selectedHotelId,
+        car: tripType === "hotel-only" ? null : selectedCarId,
         outbound_date: search.departure,
         return_date: search.returnDate || search.departure,
         trip_days: duration,
         total_price: total,
         passengers: extractPassengerCount(search.passengers),
         seat_class: "Economy",
+        booking_metadata: {
+          trip_type: tripType,
+          selected_flight: tripType === "hotel-only" || tripType === "car-only" ? null : selectedFlight || null,
+          selected_return_flight: tripType === "roundtrip" ? selectedReturnFlight || null : null,
+          selected_hotel: tripType === "car-only" ? null : selectedHotel || null,
+          selected_car: tripType === "hotel-only" ? null : selectedCar || null,
+        },
       });
       resetBooking();
       router.push("/my-bookings?confirmed=true");
     } catch (err) {
-      setError("Could not create booking in the backend.");
+      setError(
+        getFriendlyErrorMessage(
+          err,
+          "We could not create the booking right now. Please try again.",
+          "booking"
+        )
+      );
     } finally {
       setSubmitting(false);
     }
@@ -682,7 +1372,7 @@ export function PaymentScreen({ initialParams }) {
 
   return (
     <>
-      {tripType === "roundtrip" ? <BookingProgress currentStep="payment" /> : null}
+      {tripType === "roundtrip" ? <BookingProgress currentStep="payment" stepLinks={stepLinks} /> : null}
       <PageHero
         eyebrow="Payment"
         title="Complete payment"
@@ -744,7 +1434,7 @@ export function PaymentScreen({ initialParams }) {
           {error ? <ErrorPanel text={error} className="mt-4" /> : null}
           <button
             onClick={handlePayment}
-            disabled={submitting}
+            disabled={submitting || !hasBookingSelection}
             className="mt-6 inline-flex min-h-12 w-full items-center justify-center rounded-full bg-orange-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {submitting ? "Creating booking..." : "Pay now"}
@@ -754,15 +1444,42 @@ export function PaymentScreen({ initialParams }) {
         <article className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
           <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">Order summary</p>
           <div className="mt-6 space-y-4 text-sm text-slate-600">
-            <SummaryRow label={`${selectedFlight.airline} flight`} value={formatCurrency(selectedFlight.price)} />
-            <SummaryRow
-              label={`${selectedHotel?.name || "Hotel"} x ${duration} days`}
-              value={formatCurrency((selectedHotel?.pricePerDay || 0) * duration)}
-            />
-            <SummaryRow
-              label={`${selectedCar?.name || "Car"} x ${duration} days`}
-              value={formatCurrency((selectedCar?.pricePerDay || 0) * duration)}
-            />
+            {tripType !== "hotel-only" && tripType !== "car-only" ? (
+              <SummaryRow
+                label={`${selectedFlight.airline} flight`}
+                detail="One-time flight price"
+                value={formatCurrency(selectedFlight?.price || 0)}
+              />
+            ) : null}
+            {tripType === "roundtrip" ? (
+              <SummaryRow
+                label={
+                  selectedReturnFlight
+                    ? `${selectedReturnFlight.airline} return flight`
+                    : "Return flight"
+                }
+                detail={
+                  selectedReturnFlight
+                    ? "One-time return flight price"
+                    : "Required for round-trip bookings"
+                }
+                value={formatCurrency(selectedReturnFlight?.price || 0)}
+              />
+            ) : null}
+            {tripType !== "car-only" ? (
+              <SummaryRow
+                label={`${selectedHotel?.name || "Hotel"} stay`}
+                detail={`${formatCurrency(selectedHotel?.pricePerDay || 0)} per night x ${duration} ${duration === 1 ? "night" : "nights"}`}
+                value={formatCurrency((selectedHotel?.pricePerDay || 0) * duration)}
+              />
+            ) : null}
+            {tripType !== "hotel-only" ? (
+              <SummaryRow
+                label={`${selectedCar?.name || "Car"} rental`}
+                detail={`${formatCurrency(selectedCar?.pricePerDay || 0)} per day x ${duration} ${duration === 1 ? "day" : "days"}`}
+                value={formatCurrency((selectedCar?.pricePerDay || 0) * duration)}
+              />
+            ) : null}
           </div>
           <div className="mt-6 rounded-[24px] bg-slate-50 p-4">
             <SummaryRow label="Total" value={formatCurrency(total)} emphasized />
@@ -780,6 +1497,7 @@ function TripRecommendationsSection({
   selectedFlightId,
   selectedFlight,
   selectFlight,
+  selectedReturnFlightId = null,
 }) {
   const router = useRouter();
   const [hotels, setHotels] = useState([]);
@@ -843,9 +1561,10 @@ function TripRecommendationsSection({
                     selectFlight(selectedFlight);
                   }
                   router.push(
-                    `/hotel-selection?${buildBookingQuery({
+                    `/${selectedReturnFlightId ? "hotel-selection" : "return-flight-selection"}?${buildBookingQuery({
                       search,
                       flightId: selectedFlightId,
+                      returnFlightId: selectedReturnFlightId,
                       hotelId: hotel.id,
                     })}`
                   );
@@ -870,9 +1589,10 @@ function TripRecommendationsSection({
                     selectFlight(selectedFlight);
                   }
                   router.push(
-                    `/car-rental?${buildBookingQuery({
+                    `/${selectedReturnFlightId ? "car-rental" : "return-flight-selection"}?${buildBookingQuery({
                       search,
                       flightId: selectedFlightId,
+                      returnFlightId: selectedReturnFlightId,
                       carId: car.id,
                     })}`
                   );
@@ -891,15 +1611,23 @@ function useBookingSnapshot(initialParams) {
 
   const searchState = useBookingStore((state) => state.search);
   const selectedFlightId = useBookingStore((state) => state.selectedFlightId);
+  const selectedReturnFlightId = useBookingStore((state) => state.selectedReturnFlightId);
   const selectedHotelId = useBookingStore((state) => state.selectedHotelId);
   const selectedCarId = useBookingStore((state) => state.selectedCarId);
   const selectedFlight = useBookingStore((state) => state.selectedFlight);
+  const selectedReturnFlight = useBookingStore((state) => state.selectedReturnFlight);
   const selectedHotel = useBookingStore((state) => state.selectedHotel);
   const selectedCar = useBookingStore((state) => state.selectedCar);
   const selectFlight = useBookingStore((state) => state.selectFlight);
+  const selectReturnFlight = useBookingStore((state) => state.selectReturnFlight);
   const selectHotel = useBookingStore((state) => state.selectHotel);
   const selectCar = useBookingStore((state) => state.selectCar);
   const resetBooking = useBookingStore((state) => state.resetBooking);
+  const resolvedFlightId = initialParams?.flight || selectedFlightId || selectedFlight?.id || null;
+  const resolvedReturnFlightId =
+    initialParams?.returnFlight || selectedReturnFlightId || selectedReturnFlight?.id || null;
+  const resolvedHotelId = initialParams?.hotel || selectedHotelId || selectedHotel?.id || null;
+  const resolvedCarId = initialParams?.car || selectedCarId || selectedCar?.id || null;
 
   const search = {
     ...defaultBookingSearch,
@@ -912,9 +1640,9 @@ function useBookingSnapshot(initialParams) {
   };
 
   const fallbackFlight = {
-    id: selectedFlightId || initialParams?.flight || "0",
+    id: resolvedFlightId || "0",
     airline: "Selected flight",
-    code: `FL ${selectedFlightId || initialParams?.flight || ""}`,
+    code: `FL ${resolvedFlightId || ""}`,
     departure: "--:--",
     arrival: "--:--",
     duration: "TBD",
@@ -922,14 +1650,14 @@ function useBookingSnapshot(initialParams) {
   };
 
   const fallbackHotel = {
-    id: selectedHotelId || initialParams?.hotel || "0",
+    id: resolvedHotelId || "0",
     name: "Selected hotel",
     rating: 0,
     pricePerDay: 0,
   };
 
   const fallbackCar = {
-    id: selectedCarId || initialParams?.car || "0",
+    id: resolvedCarId || "0",
     name: "Selected car",
     type: "No car details yet",
     pricePerDay: 0,
@@ -937,13 +1665,16 @@ function useBookingSnapshot(initialParams) {
 
   return {
     search,
-    selectedFlightId: initialParams?.flight || selectedFlightId || null,
-    selectedHotelId: initialParams?.hotel || selectedHotelId || null,
-    selectedCarId: initialParams?.car || selectedCarId || null,
+    selectedFlightId: resolvedFlightId,
+    selectedReturnFlightId: resolvedReturnFlightId,
+    selectedHotelId: resolvedHotelId,
+    selectedCarId: resolvedCarId,
     selectedFlight: selectedFlight || fallbackFlight,
+    selectedReturnFlight: selectedReturnFlight || null,
     selectedHotel: selectedHotel || fallbackHotel,
     selectedCar: selectedCar || fallbackCar,
     selectFlight,
+    selectReturnFlight,
     selectHotel,
     selectCar,
     resetBooking,
@@ -967,10 +1698,13 @@ function Input({ label, error, ...props }) {
   );
 }
 
-function SummaryRow({ label, value, emphasized = false }) {
+function SummaryRow({ label, value, detail, emphasized = false }) {
   return (
     <div className="flex items-center justify-between">
-      <span className={emphasized ? "font-semibold text-slate-900" : ""}>{label}</span>
+      <div>
+        <span className={emphasized ? "font-semibold text-slate-900" : ""}>{label}</span>
+        {detail ? <p className="text-xs text-slate-500">{detail}</p> : null}
+      </div>
       <span
         className={
           emphasized
@@ -1004,7 +1738,7 @@ function FlightFilterBar({ filters, setFilters, airlineOptions }) {
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <FilterField label="Airline">
           <select
             value={filters.airline}
@@ -1076,6 +1810,450 @@ function FlightFilterBar({ filters, setFilters, airlineOptions }) {
             className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
           />
         </FilterField>
+
+        <FilterField label="Stops">
+          <select
+            value={filters.stops}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                stops: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          >
+            <option value="all">Any</option>
+            <option value="nonstop">Nonstop only</option>
+            <option value="stops">With stops</option>
+          </select>
+        </FilterField>
+
+        <FilterField label="Max duration">
+          <input
+            type="number"
+            min="0"
+            placeholder="Minutes"
+            value={filters.maxDuration}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                maxDuration: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          />
+        </FilterField>
+      </div>
+    </div>
+  );
+}
+
+function FlightResultsSidebar({ filters, setFilters, airlineOptions, tripType, flights, search }) {
+  const stopSummary = summarizeStopOptions(flights, tripType);
+  const departureLabels = getDepartureLabels(search, tripType);
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Stops</p>
+        <div className="mt-4 space-y-3">
+          {stopSummary.map((option) => (
+            <label key={option.value} className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={
+                  filters.stops === option.value ||
+                  (filters.stops === "all" && option.value === "all")
+                }
+                onChange={() =>
+                  setFilters((current) => ({
+                    ...current,
+                    stops: current.stops === option.value ? "all" : option.value,
+                  }))
+                }
+                className="mt-1 h-5 w-5 rounded border-slate-300 text-[#173a7a] focus:ring-[#173a7a]"
+              />
+              <div>
+                <p className="text-base font-medium text-slate-900">{option.label}</p>
+                <p className="text-sm text-slate-500">{option.meta}</p>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Airline</p>
+        <div className="mt-3">
+          <select
+            value={filters.airline}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                airline: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          >
+            <option value="all">All airlines</option>
+            {airlineOptions.map((airline) => (
+              <option key={airline} value={airline}>
+                {airline}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Departure Times</p>
+        <div className="mt-4 space-y-4">
+          {departureLabels.map((label, index) => (
+            <div key={label}>
+              <p className="text-sm font-medium text-slate-900">
+                {index + 1}. {label}
+              </p>
+              <p className="mt-2 text-sm text-slate-500">
+                {filters.departureWindow === "all"
+                  ? "00:00 - 23:59"
+                  : filters.departureWindow === "morning"
+                    ? "05:00 - 11:59"
+                    : filters.departureWindow === "afternoon"
+                      ? "12:00 - 17:59"
+                      : "18:00 - 23:59"}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {["all", "morning", "afternoon", "evening"].map((window) => (
+                  <button
+                    key={window}
+                    type="button"
+                    onClick={() =>
+                      setFilters((current) => ({
+                        ...current,
+                        departureWindow: window,
+                      }))
+                    }
+                    className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                      filters.departureWindow === window
+                        ? "border-[#173a7a] bg-slate-50 text-[#173a7a]"
+                        : "border-slate-200 bg-white text-slate-500"
+                    }`}
+                  >
+                    {window === "all" ? "Any" : window}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Price And Duration</p>
+        <div className="mt-3 grid gap-3">
+          <FilterField label="Max price">
+            <input
+              type="number"
+              min="0"
+              placeholder="No limit"
+              value={filters.maxPrice}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  maxPrice: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            />
+          </FilterField>
+          <FilterField label="Max duration">
+            <input
+              type="number"
+              min="0"
+              placeholder="Minutes"
+              value={filters.maxDuration}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  maxDuration: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            />
+          </FilterField>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlightResultsSummaryStrip({ flights, filters, setFilters, tripType }) {
+  const resultCount = flights.length;
+  const cheapest = flights.reduce((best, flight) => {
+    const price = tripType === "multicity" ? Number(flight.totalPrice || 0) : Number(flight.price || 0);
+    if (!best || price < best.price) {
+      return { price, duration: tripType === "multicity" ? flight.totalDurationDisplay : flight.duration };
+    }
+    return best;
+  }, null);
+  const fastest = flights.reduce((best, flight) => {
+    const minutes = tripType === "multicity" ? Number(flight.totalDurationMinutes || 0) : Number(flight.durationMinutes || 0);
+    if (!best || minutes < best.minutes) {
+      return {
+        minutes,
+        price: tripType === "multicity" ? Number(flight.totalPrice || 0) : Number(flight.price || 0),
+      };
+    }
+    return best;
+  }, null);
+  const best = filters.sortBy === "price-desc" ? cheapest : flights[0]
+    ? {
+        price: tripType === "multicity" ? Number(flights[0].totalPrice || 0) : Number(flights[0].price || 0),
+        duration: tripType === "multicity" ? flights[0].totalDurationDisplay : flights[0].duration,
+      }
+    : null;
+
+  return (
+    <div className="mb-5 space-y-4">
+      <div className="text-sm font-medium text-slate-700">
+        {resultCount} results sorted by{" "}
+        <span className="font-semibold text-slate-900">
+          {filters.sortBy === "price-desc"
+            ? "Price"
+            : filters.sortBy === "departure-early"
+              ? "Earliest departure"
+              : filters.sortBy === "departure-late"
+                ? "Latest departure"
+                : "Best"}
+        </span>
+      </div>
+      <div className="grid overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm md:grid-cols-[1fr_1fr_1fr_220px]">
+        <SummaryMetricCard title="Best" value={best?.price || 0} subtitle={`${best?.duration || "TBD"} average`} active />
+        <SummaryMetricCard title="Cheapest" value={cheapest?.price || 0} subtitle={`${cheapest?.duration || "TBD"} average`} />
+        <SummaryMetricCard title="Fastest" value={fastest?.price || 0} subtitle={`${formatMinutesAsDuration(fastest?.minutes || 0)} average`} />
+        <div className="flex items-center justify-center border-t border-slate-200 px-5 py-5 md:border-l md:border-t-0">
+          <FilterField label="Sort">
+            <select
+              value={filters.sortBy}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  sortBy: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            >
+              <option value="price-asc">Best</option>
+              <option value="price-desc">Cheapest</option>
+              <option value="departure-early">Fastest/Earliest</option>
+              <option value="departure-late">Latest</option>
+            </select>
+          </FilterField>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryMetricCard({ title, value, subtitle, active = false }) {
+  return (
+    <div className={`border-t border-slate-200 px-5 py-4 md:border-r md:border-t-0 ${active ? "bg-[#173a7a] text-white" : "bg-white text-slate-900"}`}>
+      <p className={`text-sm font-medium ${active ? "text-white/85" : "text-slate-600"}`}>{title}</p>
+      <p className="mt-2 text-2xl font-semibold">{formatCurrency(value)}</p>
+      <p className={`mt-1 text-sm ${active ? "text-white/85" : "text-slate-500"}`}>{subtitle}</p>
+    </div>
+  );
+}
+
+function HotelFilterBar({ filters, setFilters }) {
+  return (
+    <div className="space-y-4">
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Minimum Rating</p>
+        <div className="mt-3">
+          <select
+            value={filters.minRating}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                minRating: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          >
+            <option value="any">Any rating</option>
+            <option value="3">3+ stars</option>
+            <option value="4">4+ stars</option>
+            <option value="4.5">4.5+ stars</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Price Source</p>
+        <div className="mt-3">
+          <select
+            value={filters.priceSource}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                priceSource: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          >
+            <option value="all">Any source</option>
+            <option value="live">Live prices</option>
+            <option value="reference">Reference prices</option>
+            <option value="pending">Price pending</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Price And Sorting</p>
+        <div className="mt-3 grid gap-3">
+          <FilterField label="Max nightly price">
+            <input
+              type="number"
+              min="0"
+              placeholder="No limit"
+              value={filters.maxPrice}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  maxPrice: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            />
+          </FilterField>
+
+          <FilterField label="Sort by">
+            <select
+              value={filters.sortBy}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  sortBy: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            >
+              <option value="recommended">Recommended</option>
+              <option value="price-asc">Price: Low to High</option>
+              <option value="price-desc">Price: High to Low</option>
+              <option value="rating-desc">Rating: High to Low</option>
+            </select>
+          </FilterField>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CarFilterBar({ filters, setFilters, carTypeOptions }) {
+  return (
+    <div className="space-y-4">
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Car Type</p>
+        <div className="mt-3">
+          <select
+            value={filters.carType}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                carType: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          >
+            <option value="all">All types</option>
+            {carTypeOptions.map((carType) => (
+              <option key={carType} value={carType}>
+                {carType}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Seats And Availability</p>
+        <div className="mt-3 grid gap-3">
+          <FilterField label="Minimum seats">
+            <select
+              value={filters.seats}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  seats: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            >
+              <option value="all">Any</option>
+              <option value="4">4+ seats</option>
+              <option value="5">5+ seats</option>
+              <option value="7">7+ seats</option>
+            </select>
+          </FilterField>
+
+          <FilterField label="Availability">
+            <select
+              value={filters.availability}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  availability: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            >
+              <option value="available">Available only</option>
+              <option value="all">Show all</option>
+              <option value="unavailable">Unavailable only</option>
+            </select>
+          </FilterField>
+        </div>
+      </div>
+
+      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-xl font-semibold text-slate-900">Price And Sorting</p>
+        <div className="mt-3 grid gap-3">
+          <FilterField label="Max daily price">
+          <input
+            type="number"
+            min="0"
+            placeholder="No limit"
+            value={filters.maxPrice}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                maxPrice: event.target.value,
+              }))
+            }
+            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+          />
+        </FilterField>
+
+          <FilterField label="Sort by">
+            <select
+              value={filters.sortBy}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  sortBy: event.target.value,
+                }))
+              }
+              className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+            >
+              <option value="price-asc">Price: Low to High</option>
+              <option value="price-desc">Price: High to Low</option>
+              <option value="seats-desc">Seats: Most first</option>
+            </select>
+          </FilterField>
+        </div>
       </div>
     </div>
   );
@@ -1098,36 +2276,96 @@ function ErrorPanel({ text, className = "" }) {
   return <div className={`rounded-[24px] border border-red-200 bg-red-50 p-4 text-sm text-red-700 ${className}`}>{text}</div>;
 }
 
-function BudgetSidebar({ tripType, flight, hotel, car, duration }) {
-  const total =
-    (flight?.price || 0) +
-    (hotel?.pricePerDay || 0) * Math.max(duration || 1, 1) +
-    (car?.pricePerDay || 0) * Math.max(duration || 1, 1);
+function BudgetSidebar({ tripType, flight, hotel, car, duration, compact = false }) {
+  const stayDays = Math.max(duration || 1, 1);
+  const flightTotal = flight?.price || 0;
+  const hotelUnitPrice = hotel?.pricePerDay || 0;
+  const hotelTotal = hotelUnitPrice * stayDays;
+  const carUnitPrice = car?.pricePerDay || 0;
+  const carTotal = carUnitPrice * stayDays;
+  const total = flightTotal + hotelTotal + carTotal;
 
   return (
-    <aside className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-      <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
+    <aside className={`rounded-[32px] border border-slate-200 bg-white shadow-sm ${compact ? "p-5" : "p-6"}`}>
+      <p className={`${compact ? "text-xs" : "text-sm"} font-semibold uppercase tracking-[0.22em] text-orange-500`}>
         Budget Snapshot
       </p>
-      <h3 className="mt-3 text-2xl font-semibold text-slate-900">
-        {tripType === "roundtrip" ? "Current trip total" : "Current flight budget"}
+      <h3 className={`mt-3 font-semibold text-slate-900 ${compact ? "text-xl" : "text-2xl"}`}>
+        {tripType === "roundtrip"
+          ? "Current trip total"
+          : tripType === "hotel-only"
+            ? "Current stay total"
+            : tripType === "car-only"
+              ? "Current rental total"
+            : "Current flight total"}
       </h3>
-      <div className="mt-6 space-y-4 text-sm text-slate-600">
-        <SummaryRow label="Flight" value={formatCurrency(flight?.price || 0)} />
-        <SummaryRow
-          label="Hotel"
-          value={formatCurrency((hotel?.pricePerDay || 0) * Math.max(duration || 1, 1))}
-        />
-        <SummaryRow
-          label="Car"
-          value={formatCurrency((car?.pricePerDay || 0) * Math.max(duration || 1, 1))}
-        />
+      <div className={`text-sm text-slate-600 ${compact ? "mt-5 space-y-3" : "mt-6 space-y-4"}`}>
+        <SummaryRow label="Flight" detail="One-time price" value={formatCurrency(flightTotal)} />
+        {tripType !== "multicity" ? (
+          <>
+            <SummaryRow
+              label="Hotel"
+              detail={`${formatCurrency(hotelUnitPrice)} per night x ${stayDays} ${stayDays === 1 ? "night" : "nights"}`}
+              value={formatCurrency(hotelTotal)}
+            />
+            <SummaryRow
+              label="Car"
+              detail={`${formatCurrency(carUnitPrice)} per day x ${stayDays} ${stayDays === 1 ? "day" : "days"}`}
+              value={formatCurrency(carTotal)}
+            />
+          </>
+        ) : null}
       </div>
-      <div className="mt-6 rounded-[24px] bg-slate-50 p-4">
+      <div className={`rounded-[24px] bg-slate-50 ${compact ? "mt-5 p-3" : "mt-6 p-4"}`}>
         <SummaryRow label="Estimated total" value={formatCurrency(total)} emphasized />
       </div>
     </aside>
   );
+}
+
+function buildStepLinks(search, { flightId = null, returnFlightId = null, hotelId = null, carId = null } = {}) {
+  const requiresReturnFlight = search.tripType === "roundtrip";
+  const isMultiCity = search.tripType === "multicity";
+  const isHotelOnly = search.tripType === "hotel-only";
+  const isCarOnly = search.tripType === "car-only";
+  const hasFlightSelection = Boolean(flightId);
+  const hasRequiredFlightSelection = hasFlightSelection && (!requiresReturnFlight || returnFlightId);
+
+  return {
+    flights: `/flight-results?${buildBookingQuery({ search, flightId, returnFlightId })}`,
+    hotel:
+      isHotelOnly
+        ? `/hotel-deals?${buildBookingQuery({ search, hotelId })}`
+        : isCarOnly || isMultiCity || !hasRequiredFlightSelection
+        ? ""
+        : `/hotel-selection?${buildBookingQuery({ search, flightId, returnFlightId, hotelId })}`,
+    car:
+      isCarOnly
+        ? `/car-deals?${buildBookingQuery({ search, carId })}`
+        : isHotelOnly || isMultiCity || !(hasRequiredFlightSelection && hotelId)
+        ? ""
+        : `/car-rental?${buildBookingQuery({ search, flightId, returnFlightId, hotelId, carId })}`,
+    summary:
+      isCarOnly || isHotelOnly || isMultiCity || !(hasRequiredFlightSelection && hotelId)
+        ? ""
+        : `/booking-summary?${buildBookingQuery({ search, flightId, returnFlightId, hotelId, carId })}`,
+    payment:
+      isHotelOnly
+        ? hotelId
+          ? `/payment?${buildBookingQuery({ search, hotelId })}`
+          : ""
+        : isCarOnly
+          ? carId
+            ? `/payment?${buildBookingQuery({ search, carId })}`
+            : ""
+        : isMultiCity
+        ? hasRequiredFlightSelection
+          ? `/payment?${buildBookingQuery({ search, flightId, returnFlightId })}`
+          : ""
+        : hasRequiredFlightSelection && hotelId
+          ? `/payment?${buildBookingQuery({ search, flightId, returnFlightId, hotelId, carId })}`
+          : "",
+  };
 }
 
 function OneWayUpsellPanel({ search, selectedFlightId }) {
@@ -1215,4 +2453,267 @@ function hasMultiCityStopover(segments) {
 function extractPassengerCount(value) {
   const match = String(value || "").match(/\d+/);
   return match ? Number(match[0]) : 1;
+}
+
+async function fetchMultiCityItineraries(segments) {
+  const normalizedSegments = Array.isArray(segments) ? segments.filter((segment) => segment?.from && segment?.to && segment?.departure) : [];
+  if (normalizedSegments.length === 0) {
+    return [];
+  }
+
+  const legResults = await Promise.all(
+    normalizedSegments.map(async (segment, segmentIndex) => {
+      const flights = await fetchFlights({
+        from: segment.from,
+        to: segment.to,
+        departure: segment.departure,
+      });
+
+      return flights.slice(0, 3).map((flight) => ({
+        ...flight,
+        segmentIndex,
+        segmentLabel: `Flight ${segmentIndex + 1}`,
+        fromLabel: segment.from,
+        toLabel: segment.to,
+        departureDate: segment.departure,
+      }));
+    })
+  );
+
+  if (legResults.some((leg) => leg.length === 0)) {
+    return [];
+  }
+
+  const itineraries = [];
+  const limit = 9;
+
+  function walk(currentLegIndex, selectedLegs) {
+    if (itineraries.length >= limit) {
+      return;
+    }
+
+    if (currentLegIndex >= legResults.length) {
+      const totalPrice = selectedLegs.reduce((sum, leg) => sum + Number(leg.price || 0), 0);
+      const totalDurationMinutes = selectedLegs.reduce((sum, leg) => sum + Number(leg.durationMinutes || 0), 0);
+      const carriers = Array.from(new Set(selectedLegs.map((leg) => leg.airline).filter(Boolean)));
+
+      itineraries.push({
+        id: selectedLegs.map((leg) => leg.id).join("__"),
+        legs: selectedLegs,
+        totalPrice,
+        totalDurationMinutes,
+        totalDurationDisplay: formatMinutesAsDuration(totalDurationMinutes),
+        totalStopCount: selectedLegs.reduce((sum, leg) => sum + Number(leg.stopCount || 0), 0),
+        primaryAirline: carriers[0] || "SkyBook Air",
+        airlineSummary: carriers.length === 1 ? carriers[0] : `${carriers[0]} +${carriers.length - 1}`,
+      });
+      return;
+    }
+
+    for (const option of legResults[currentLegIndex]) {
+      walk(currentLegIndex + 1, [...selectedLegs, option]);
+      if (itineraries.length >= limit) {
+        break;
+      }
+    }
+  }
+
+  walk(0, []);
+
+  const cheapestPrice = itineraries.reduce((min, itinerary) => Math.min(min, itinerary.totalPrice), Number.POSITIVE_INFINITY);
+  const fastestMinutes = itineraries.reduce(
+    (min, itinerary) => Math.min(min, itinerary.totalDurationMinutes),
+    Number.POSITIVE_INFINITY
+  );
+
+  return itineraries
+    .sort((left, right) => left.totalPrice - right.totalPrice)
+    .map((itinerary, index) => ({
+      ...itinerary,
+      badge:
+        itinerary.totalPrice === cheapestPrice
+          ? "Best value"
+          : itinerary.totalDurationMinutes === fastestMinutes
+            ? "Fastest"
+            : index === 0
+              ? "Recommended"
+              : null,
+    }));
+}
+
+function formatMinutesAsDuration(value) {
+  const minutes = Number(value || 0);
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (!hours) {
+    return `${remainder}m`;
+  }
+  if (!remainder) {
+    return `${hours}h`;
+  }
+  return `${hours}h ${remainder}m`;
+}
+
+function mapItineraryBudgetFlight(itinerary) {
+  if (!itinerary) {
+    return null;
+  }
+
+  return {
+    airline: itinerary.airlineSummary || itinerary.primaryAirline || "Itinerary",
+    code: `${itinerary.legs?.length || 0} legs`,
+    departure: itinerary.legs?.[0]?.departure || "--:--",
+    arrival: itinerary.legs?.[itinerary.legs.length - 1]?.arrival || "--:--",
+    duration: itinerary.totalDurationDisplay || "TBD",
+    price: itinerary.totalPrice || 0,
+  };
+}
+
+function summarizeStopOptions(flights, tripType) {
+  const prices = { all: [], nonstop: [], stops: [] };
+
+  flights.forEach((flight) => {
+    const price = tripType === "multicity" ? Number(flight.totalPrice || 0) : Number(flight.price || 0);
+    const stopCount = tripType === "multicity" ? Number(flight.totalStopCount || 0) : Number(flight.stopCount || 0);
+    prices.all.push(price);
+    if (stopCount === 0) {
+      prices.nonstop.push(price);
+    } else {
+      prices.stops.push(price);
+    }
+  });
+
+  return [
+    {
+      value: "all",
+      label: "Any",
+      meta: prices.all.length ? `from ${formatCurrency(Math.min(...prices.all))}` : "No results",
+    },
+    {
+      value: "nonstop",
+      label: "Direct",
+      meta: prices.nonstop.length ? `from ${formatCurrency(Math.min(...prices.nonstop))}` : "No direct routes",
+    },
+    {
+      value: "stops",
+      label: tripType === "multicity" ? "With connections" : "1+ stop",
+      meta: prices.stops.length ? `from ${formatCurrency(Math.min(...prices.stops))}` : "No connected routes",
+    },
+  ];
+}
+
+function getDepartureLabels(search, tripType) {
+  if (tripType === "multicity" && Array.isArray(search.multiCitySegments) && search.multiCitySegments.length > 0) {
+    return search.multiCitySegments.map(
+      (segment) => `${segment.from || "Departure"} - ${segment.to || "Arrival"}`
+    );
+  }
+
+  return [`${search.from || "Departure"} - ${search.to || "Arrival"}`];
+}
+
+function MultiCityItineraryCard({ itinerary, index, selected, onSelect }) {
+  return (
+    <article
+      className={`overflow-hidden rounded-[30px] border bg-white shadow-sm transition ${
+        selected ? "border-[#173a7a] ring-2 ring-[#173a7a]/10" : "border-slate-200"
+      }`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#173a7a] text-sm font-semibold text-white">
+            {(itinerary.primaryAirline || "SK").slice(0, 2).toUpperCase()}
+          </div>
+          <div>
+            <p className="text-lg font-semibold text-slate-900">{itinerary.airlineSummary}</p>
+            <p className="text-sm text-slate-500">
+              {itinerary.legs.length} flights · {itinerary.totalDurationDisplay} total travel time
+            </p>
+          </div>
+        </div>
+        {itinerary.badge ? (
+          <span
+            className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${
+              itinerary.badge === "Best value"
+                ? "bg-emerald-50 text-emerald-700"
+                : itinerary.badge === "Fastest"
+                  ? "bg-sky-50 text-sky-700"
+                  : "bg-orange-50 text-orange-700"
+            }`}
+          >
+            {itinerary.badge}
+          </span>
+        ) : (
+          <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+            Option {index + 1}
+          </span>
+        )}
+      </div>
+
+      <div className="grid gap-0 lg:grid-cols-[1.4fr_0.6fr]">
+        <div className="divide-y divide-slate-200">
+          {itinerary.legs.map((leg) => (
+            <div key={leg.id} className="grid gap-4 px-5 py-5 md:grid-cols-[120px_1fr_120px] md:items-center">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  {leg.segmentLabel}
+                </p>
+                <p className="mt-2 text-sm font-semibold text-slate-900">{leg.airline}</p>
+                <p className="text-xs text-slate-500">{leg.code}</p>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[1fr_auto_1fr] md:items-center">
+                <div className="min-w-0">
+                  <p className="text-2xl font-semibold leading-none text-slate-900">{leg.departure}</p>
+                  <p className="mt-2 text-sm font-medium text-slate-700">{leg.fromLabel}</p>
+                </div>
+                <div className="flex flex-col items-center text-slate-400">
+                  <p className="text-xs font-medium text-slate-500">{leg.duration}</p>
+                  <div className="mt-2 h-px w-20 bg-slate-300 md:w-24" />
+                  <p className="mt-2 text-xs font-medium text-sky-700">{leg.stops}</p>
+                </div>
+                <div className="min-w-0 text-left md:text-right">
+                  <p className="text-2xl font-semibold leading-none text-slate-900">{leg.arrival}</p>
+                  <p className="mt-2 text-sm font-medium text-slate-700">{leg.toLabel}</p>
+                </div>
+              </div>
+
+              <div className="text-left md:text-right">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Leg price
+                </p>
+                <p className="mt-2 text-xl font-semibold text-slate-900">{formatCurrency(leg.price || 0)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-col justify-between border-t border-slate-200 bg-slate-50 px-5 py-5 lg:border-l lg:border-t-0">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Complete itinerary
+            </p>
+            <p className="mt-3 text-sm text-slate-600">
+              {itinerary.totalStopCount === 0 ? "All direct flights" : `${itinerary.totalStopCount} total stop${itinerary.totalStopCount === 1 ? "" : "s"}`}
+            </p>
+            <p className="mt-5 text-sm text-slate-500">Combined price from</p>
+            <p className="mt-2 text-4xl font-semibold tracking-tight text-slate-900">
+              {formatCurrency(itinerary.totalPrice)}
+            </p>
+          </div>
+
+          <button
+            onClick={onSelect}
+            className={`mt-6 inline-flex min-h-12 items-center justify-center rounded-full px-5 py-3 text-sm font-semibold transition ${
+              selected
+                ? "bg-[#173a7a] text-white"
+                : "bg-orange-500 text-white hover:bg-orange-600"
+            }`}
+          >
+            {selected ? "Selected itinerary" : "Select itinerary"}
+          </button>
+        </div>
+      </div>
+    </article>
+  );
 }

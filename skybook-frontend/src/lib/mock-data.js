@@ -37,29 +37,186 @@ export const popularDestinations = [
   },
 ];
 
-export const trendingTrips = [
+export const bundleDeals = [
   {
     id: "italy-train",
+    slug: "city-lights-london",
     title: "7 Days in Italy",
     description: "Rome, Florence, and Venice with a train-first route.",
     price: 1299,
     badge: "Trending",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "London, United Kingdom (LHR)",
+      departure: buildFutureDateValue(14),
+      returnDate: buildFutureDateValue(20),
+      passengers: "2 Adults",
+    },
   },
   {
     id: "europe-long-weekend",
+    slug: "weekend-dubai-escape",
     title: "European Long Weekend",
     description: "Flight + hotel bundles built for quick city breaks.",
     price: 699,
     badge: "Weekend pick",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Dubai, United Arab Emirates (DXB)",
+      departure: buildFutureDateValue(10),
+      returnDate: buildFutureDateValue(14),
+      passengers: "2 Adults",
+    },
   },
   {
     id: "beach-reset",
+    slug: "bangkok-beach-reset",
     title: "Beach Reset",
     description: "Bali and Phuket packages with flexible return dates.",
     price: 1199,
     badge: "Popular",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Bangkok, Thailand (BKK)",
+      departure: buildFutureDateValue(18),
+      returnDate: buildFutureDateValue(24),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "tokyo-skyline",
+    slug: "tokyo-skyline-escape",
+    title: "Tokyo Skyline Escape",
+    description: "Flights, hotel, and city car setup for a modern Tokyo break.",
+    price: 1499,
+    badge: "Top rated",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Tokyo, Japan (HND)",
+      departure: buildFutureDateValue(22),
+      returnDate: buildFutureDateValue(28),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "paris-romance",
+    slug: "paris-romance-week",
+    title: "Paris Romance Week",
+    description: "A classic Paris bundle with flights, stay, and local car option.",
+    price: 1399,
+    badge: "Popular",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Paris, France (CDG)",
+      departure: buildFutureDateValue(16),
+      returnDate: buildFutureDateValue(22),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "singapore-city",
+    slug: "singapore-city-break",
+    title: "Singapore City Break",
+    description: "Short premium city bundle with flight, hotel, and transfer-ready car.",
+    price: 999,
+    badge: "Weekend pick",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Singapore, Singapore (SIN)",
+      departure: buildFutureDateValue(12),
+      returnDate: buildFutureDateValue(16),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "london-classic",
+    slug: "london-classic-getaway",
+    title: "London Classic Getaway",
+    description: "A ready-made London package with return flights, hotel, and car.",
+    price: 1349,
+    badge: "Trending",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "London, United Kingdom (LHR)",
+      departure: buildFutureDateValue(26),
+      returnDate: buildFutureDateValue(32),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "dubai-luxury",
+    slug: "dubai-luxury-stay",
+    title: "Dubai Luxury Stay",
+    description: "Fast escape bundle with hotel and premium local mobility included.",
+    price: 1199,
+    badge: "Luxury",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Dubai, United Arab Emirates (DXB)",
+      departure: buildFutureDateValue(18),
+      returnDate: buildFutureDateValue(22),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "bangkok-food",
+    slug: "bangkok-food-street-tour",
+    title: "Bangkok Food Street Tour",
+    description: "Bundle built for food trips with flights, stay, and city transport.",
+    price: 1099,
+    badge: "Hot now",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Bangkok, Thailand (BKK)",
+      departure: buildFutureDateValue(30),
+      returnDate: buildFutureDateValue(36),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "tokyo-premium",
+    slug: "tokyo-premium-culture",
+    title: "Tokyo Premium Culture",
+    description: "Premium Tokyo package with smooth arrivals and a city-ready itinerary.",
+    price: 1699,
+    badge: "Premium",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Tokyo, Japan (HND)",
+      departure: buildFutureDateValue(35),
+      returnDate: buildFutureDateValue(42),
+      passengers: "2 Adults",
+    },
+  },
+  {
+    id: "singapore-family",
+    slug: "singapore-family-fun",
+    title: "Singapore Family Fun",
+    description: "An easy family-ready bundle with flight, hotel, and practical car.",
+    price: 1299,
+    badge: "Family",
+    bundleSearch: {
+      tripType: "roundtrip",
+      from: "Mumbai, India (BOM)",
+      to: "Singapore, Singapore (SIN)",
+      departure: buildFutureDateValue(28),
+      returnDate: buildFutureDateValue(34),
+      passengers: "2 Adults, 1 Child",
+    },
   },
 ];
+
+export const trendingTrips = bundleDeals.slice(0, 3);
 
 export const whyAiFeatures = [
   {
@@ -404,4 +561,10 @@ export function getById(collection, id) {
   }
 
   return collection.find((item) => item.id === id) || collection[0];
+}
+
+function buildFutureDateValue(daysAhead) {
+  const date = new Date();
+  date.setDate(date.getDate() + daysAhead);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }

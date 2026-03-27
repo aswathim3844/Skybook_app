@@ -1,18 +1,18 @@
 import Link from "next/link";
 import HomeHeroTabs from "@/components/travel/HomeHeroTabs";
+import BundleDealsGrid from "@/components/travel/BundleDealsGrid";
+import CarDealsSection from "@/components/travel/CarDealsSection";
 import HeroImageSlideshow from "@/components/travel/HeroImageSlideshow";
+import HotelDealsSection from "@/components/travel/HotelDealsSection";
 import SiteFooter from "@/components/travel/SiteFooter";
 import Navbar from "@/components/ui/Navbar";
 import {
-  DestinationCard,
   FeatureCard,
   PageHero,
   PageSection,
   TestimonialCard,
-  TrendingTripCard,
 } from "@/components/travel/TravelUI";
 import {
-  popularDestinations,
   testimonials,
   trendingTrips,
   whyAiFeatures,
@@ -54,25 +54,31 @@ export default function Home() {
       </section>
 
       <PageSection
-        eyebrow="Popular Destinations"
-        title="Popular destination inspiration"
-        description="These sections help the homepage feel complete and credible, while also giving beginners a clear example of reusable card-based layout patterns."
+        eyebrow="Hotel Stays"
+        title="Book a hotel stay directly"
       >
-        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          {popularDestinations.map((destination) => (
-            <DestinationCard key={destination.id} destination={destination} />
-          ))}
-        </div>
+        <HotelDealsSection />
+      </PageSection>
+
+      <PageSection
+        eyebrow="Car Rentals"
+        title="Book a rental car directly"
+      >
+        <CarDealsSection />
       </PageSection>
 
       <PageSection
         eyebrow="Trending Trips"
         title="Bundles and routes people are checking right now"
       >
-        <div className="grid gap-5 lg:grid-cols-3">
-          {trendingTrips.map((trip) => (
-            <TrendingTripCard key={trip.id} trip={trip} />
-          ))}
+        <BundleDealsGrid bundles={trendingTrips} limit={3} className="grid gap-5 lg:grid-cols-3" />
+        <div className="mt-6">
+          <Link
+            href="/bundles"
+            className="inline-flex min-h-12 items-center justify-center rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-900 transition hover:border-orange-200 hover:text-orange-500"
+          >
+            Show more bundles
+          </Link>
         </div>
       </PageSection>
 

@@ -155,6 +155,7 @@ class BookingSerializer(serializers.ModelSerializer):
     customer_name = serializers.SerializerMethodField()
     customer_email = serializers.SerializerMethodField()
     booking_reference = serializers.SerializerMethodField()
+    provider_booking = serializers.SerializerMethodField()
 
     class Meta:
         model = Bookings
@@ -173,6 +174,8 @@ class BookingSerializer(serializers.ModelSerializer):
             "booking_reference",
             "passengers",
             "seat_class",
+            "booking_metadata",
+            "provider_booking",
             "created_at",
             "customer_details",
             "customer_name",
@@ -196,6 +199,11 @@ class BookingSerializer(serializers.ModelSerializer):
 
     def get_customer_email(self, obj):
         return obj.customer.email if obj.customer else None
+
+    def get_provider_booking(self, obj):
+        metadata = obj.booking_metadata or {}
+        provider_booking = metadata.get("provider_booking")
+        return provider_booking if isinstance(provider_booking, dict) else None
 
 
 class CountrySerializer(serializers.ModelSerializer):

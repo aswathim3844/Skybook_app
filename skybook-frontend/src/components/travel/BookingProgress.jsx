@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 const steps = [
   { id: "flights", label: "Flights" },
   { id: "hotel", label: "Hotel" },
@@ -8,7 +10,7 @@ const steps = [
   { id: "payment", label: "Payment" },
 ];
 
-export default function BookingProgress({ currentStep }) {
+export default function BookingProgress({ currentStep, stepLinks = {} }) {
   const currentIndex = steps.findIndex((step) => step.id === currentStep);
 
   return (
@@ -19,8 +21,8 @@ export default function BookingProgress({ currentStep }) {
             const isActive = index === currentIndex;
             const isComplete = index < currentIndex;
 
-            return (
-              <div key={step.id} className="flex flex-1 items-center gap-3">
+            const content = (
+              <>
                 <div
                   className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
                     isActive
@@ -53,6 +55,21 @@ export default function BookingProgress({ currentStep }) {
                         : "Upcoming"}
                   </p>
                 </div>
+              </>
+            );
+
+            return (
+              <div key={step.id} className="flex flex-1 items-center gap-3">
+                {stepLinks[step.id] && !isActive ? (
+                  <Link
+                    href={stepLinks[step.id]}
+                    className="flex min-w-0 items-center gap-3 rounded-2xl px-2 py-1 transition hover:bg-slate-50"
+                  >
+                    {content}
+                  </Link>
+                ) : (
+                  content
+                )}
 
                 {index < steps.length - 1 ? (
                   <div className="hidden h-[2px] flex-1 rounded-full bg-slate-200 lg:block">

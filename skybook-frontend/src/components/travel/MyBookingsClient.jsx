@@ -89,7 +89,7 @@ export default function MyBookingsClient({ confirmed = false }) {
               <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
                   <p className="text-sm uppercase tracking-[0.22em] text-orange-500">
-                    BK-{booking.id}
+                    {booking.booking_reference || `SNA${String(booking.id).padStart(6, "0")}`}
                   </p>
                   <p className="mt-2 text-2xl font-semibold text-slate-900">
                     {booking.destination}
@@ -111,6 +111,20 @@ export default function MyBookingsClient({ confirmed = false }) {
                   </Link>
                 </div>
               </div>
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <BookingFact
+                  label="Flight"
+                  value={getBookedFlightLabel(booking)}
+                />
+                <BookingFact
+                  label="Hotel"
+                  value={getBookedHotelLabel(booking)}
+                />
+                <BookingFact
+                  label="Car"
+                  value={getBookedCarLabel(booking)}
+                />
+              </div>
             </article>
           ))}
         </div>
@@ -119,4 +133,45 @@ export default function MyBookingsClient({ confirmed = false }) {
       <SiteFooter />
     </main>
   );
+}
+
+function BookingFact({ label, value }) {
+  return (
+    <div className="rounded-[20px] border border-slate-200 bg-slate-50 p-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+        {label}
+      </p>
+      <p className="mt-2 text-sm font-semibold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function getBookedFlightLabel(booking) {
+  return (
+    booking.flight_details?.flight_number ||
+    booking.booking_metadata?.selected_flight?.flight_number ||
+    booking.booking_metadata?.selected_flight?.code ||
+    "Not attached"
+  );
+}
+
+function getBookedHotelLabel(booking) {
+  return (
+    booking.hotel_details?.hotel_name ||
+    booking.booking_metadata?.selected_hotel?.hotel_name ||
+    "Not attached"
+  );
+}
+
+function getBookedCarLabel(booking) {
+  if (booking.car_details?.company || booking.car_details?.car_model) {
+    return `${booking.car_details?.company || ""} ${booking.car_details?.car_model || ""}`.trim();
+  }
+
+  const snapshot = booking.booking_metadata?.selected_car;
+  if (snapshot?.company || snapshot?.car_model) {
+    return `${snapshot.company || ""} ${snapshot.car_model || ""}`.trim();
+  }
+
+  return "Not attached";
 }

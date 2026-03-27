@@ -18,12 +18,43 @@ def check_database() -> dict:
 
 def check_rag() -> dict:
     vector_path = Path(getattr(settings, "AI_VECTOR_DB_PATH", ""))
+    chroma_path = Path(getattr(settings, "AI_CHROMA_DB_PATH", ""))
     knowledge_path = Path(getattr(settings, "AI_KNOWLEDGE_BASE_PATH", ""))
+    manifest_path = vector_path / "rag_index_manifest.json"
+    advanced_manifest_path = vector_path / "advanced_rag_manifest.json"
+    llm_provider = getattr(settings, "LLM_PROVIDER", "openai")
+    llm_configured = bool(getattr(settings, "GROQ_API_KEY", "")) if llm_provider == "groq" else bool(getattr(settings, "OPENAI_API_KEY", ""))
+    manifest = {}
+    advanced_manifest = {}
+    if manifest_path.exists():
+        try:
+            import json
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+    if advanced_manifest_path.exists():
+        try:
+            import json
+
+            advanced_manifest = json.loads(advanced_manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            advanced_manifest = {}
     return {
-        "ok": bool(getattr(settings, "OPENAI_API_KEY", "")),
+        "ok": llm_configured or knowledge_path.exists(),
         "openai_configured": bool(getattr(settings, "OPENAI_API_KEY", "")),
+        "llm_provider": llm_provider,
+        "llm_configured": llm_configured,
         "vector_db_exists": vector_path.exists(),
+        "chroma_db_exists": chroma_path.exists(),
         "knowledge_base_exists": knowledge_path.exists(),
+        "prebuilt_index_exists": manifest_path.exists(),
+        "advanced_index_exists": advanced_manifest_path.exists(),
+        "indexed_chunk_count": manifest.get("chunk_count"),
+        "vector_dimensions": manifest.get("vector_dimensions"),
+        "advanced_chunk_count": advanced_manifest.get("chunk_count"),
+        "advanced_vector_dimensions": advanced_manifest.get("vector_dimensions"),
+        "advanced_collection_name": advanced_manifest.get("collection_name"),
     }
 
 

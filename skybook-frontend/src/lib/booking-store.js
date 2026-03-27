@@ -2,104 +2,133 @@
 
 import { useEffect } from "react";
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
+
+const defaultDepartureDate = buildFutureDate(14);
+const defaultReturnDate = buildFutureDate(18);
+const defaultSecondSegmentDate = buildFutureDate(16);
 
 export const defaultBookingSearch = {
   tripType: "roundtrip",
   from: "Mumbai, India (BOM)",
   to: "London, United Kingdom (LHR)",
-  departure: "2025-06-04",
-  returnDate: "2025-06-08",
+  departure: defaultDepartureDate,
+  returnDate: defaultReturnDate,
   passengers: "2 Adults",
   multiCitySegments: [
     {
       id: "segment-1",
       from: "Mumbai, India (BOM)",
       to: "London, United Kingdom (LHR)",
-      departure: "2025-06-04",
+      departure: defaultDepartureDate,
     },
     {
       id: "segment-2",
       from: "London, United Kingdom (LHR)",
       to: "Dubai, United Arab Emirates (DXB)",
-      departure: "2025-06-06",
+      departure: defaultSecondSegmentDate,
     },
   ],
 };
 
-export const useBookingStore = create((set) => ({
-  search: defaultBookingSearch,
-  selectedFlightId: null,
-  selectedHotelId: null,
-  selectedCarId: null,
-  selectedFlight: null,
-  selectedHotel: null,
-  selectedCar: null,
-  setSearchField: (field, value) =>
-    set((state) => ({
-      search: {
-        ...state.search,
-        [field]: value,
-      },
-    })),
-  setSearch: (search) =>
-    set((state) => ({
-      search: {
-        ...state.search,
-        ...search,
-      },
-    })),
-  selectFlight: (flight) =>
-    set({
-      selectedFlightId: flight?.id || null,
-      selectedFlight: flight || null,
+export const useBookingStore = create(
+  persist(
+    (set) => ({
+      search: defaultBookingSearch,
+      selectedFlightId: null,
+      selectedReturnFlightId: null,
       selectedHotelId: null,
       selectedCarId: null,
+      selectedFlight: null,
+      selectedReturnFlight: null,
       selectedHotel: null,
       selectedCar: null,
+      setSearchField: (field, value) =>
+        set((state) => ({
+          search: {
+            ...state.search,
+            [field]: value,
+          },
+        })),
+      setSearch: (search) =>
+        set((state) => ({
+          search: {
+            ...state.search,
+            ...search,
+          },
+        })),
+      selectFlight: (flight) =>
+        set({
+          selectedFlightId: flight?.id || null,
+          selectedFlight: flight || null,
+          selectedReturnFlightId: null,
+          selectedReturnFlight: null,
+          selectedHotelId: null,
+          selectedCarId: null,
+          selectedHotel: null,
+          selectedCar: null,
+        }),
+      selectReturnFlight: (flight) =>
+        set({
+          selectedReturnFlightId: flight?.id || null,
+          selectedReturnFlight: flight || null,
+          selectedHotelId: null,
+          selectedCarId: null,
+          selectedHotel: null,
+          selectedCar: null,
+        }),
+      selectHotel: (hotel) =>
+        set({
+          selectedHotelId: hotel?.id || null,
+          selectedHotel: hotel || null,
+          selectedCarId: null,
+          selectedCar: null,
+        }),
+      selectCar: (car) =>
+        set({
+          selectedCarId: car?.id || null,
+          selectedCar: car || null,
+        }),
+      hydrateFromParams: (params) =>
+        set((state) => ({
+          search: {
+            ...state.search,
+            ...(params.tripType ? { tripType: params.tripType } : {}),
+            ...(params.from ? { from: params.from } : {}),
+            ...(params.to ? { to: params.to } : {}),
+            ...(params.departure ? { departure: params.departure } : {}),
+            ...(params.return ? { returnDate: params.return } : {}),
+            ...(params.passengers ? { passengers: params.passengers } : {}),
+            ...(params.segments ? { multiCitySegments: safeParseSegments(params.segments) } : {}),
+          },
+          ...(params.flight ? { selectedFlightId: params.flight } : {}),
+          ...(params.returnFlight ? { selectedReturnFlightId: params.returnFlight } : {}),
+          ...(params.hotel ? { selectedHotelId: params.hotel } : {}),
+          ...(params.car ? { selectedCarId: params.car } : {}),
+        })),
+      resetBooking: () =>
+        set({
+          search: defaultBookingSearch,
+          selectedFlightId: null,
+          selectedReturnFlightId: null,
+          selectedHotelId: null,
+          selectedCarId: null,
+          selectedFlight: null,
+          selectedReturnFlight: null,
+          selectedHotel: null,
+          selectedCar: null,
+        }),
     }),
-  selectHotel: (hotel) =>
-    set({
-      selectedHotelId: hotel?.id || null,
-      selectedHotel: hotel || null,
-      selectedCarId: null,
-      selectedCar: null,
-    }),
-  selectCar: (car) =>
-    set({
-      selectedCarId: car?.id || null,
-      selectedCar: car || null,
-    }),
-  hydrateFromParams: (params) =>
-    set((state) => ({
-      search: {
-        ...state.search,
-        ...(params.tripType ? { tripType: params.tripType } : {}),
-        ...(params.from ? { from: params.from } : {}),
-        ...(params.to ? { to: params.to } : {}),
-        ...(params.departure ? { departure: params.departure } : {}),
-        ...(params.return ? { returnDate: params.return } : {}),
-        ...(params.passengers ? { passengers: params.passengers } : {}),
-        ...(params.segments ? { multiCitySegments: safeParseSegments(params.segments) } : {}),
-      },
-      ...(params.flight ? { selectedFlightId: params.flight } : {}),
-      ...(params.hotel ? { selectedHotelId: params.hotel } : {}),
-      ...(params.car ? { selectedCarId: params.car } : {}),
-    })),
-  resetBooking: () =>
-    set({
-        search: defaultBookingSearch,
-        selectedFlightId: null,
-        selectedHotelId: null,
-        selectedCarId: null,
-        selectedFlight: null,
-        selectedHotel: null,
-        selectedCar: null,
-    }),
-}));
+    {
+      name: "skybook-booking",
+    }
+  )
+);
 
 export function buildBookingQuery({
   search,
   flightId,
+  returnFlightId,
   hotelId,
   carId,
 }) {
@@ -129,6 +158,9 @@ export function buildBookingQuery({
   if (flightId) {
     params.set("flight", flightId);
   }
+  if (returnFlightId) {
+    params.set("returnFlight", returnFlightId);
+  }
   if (hotelId) {
     params.set("hotel", hotelId);
   }
@@ -156,4 +188,10 @@ function safeParseSegments(value) {
   } catch {
     return defaultBookingSearch.multiCitySegments;
   }
+}
+
+function buildFutureDate(daysAhead) {
+  const date = new Date();
+  date.setDate(date.getDate() + daysAhead);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }

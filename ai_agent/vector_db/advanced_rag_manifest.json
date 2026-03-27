@@ -1,0 +1,11 @@
+{
+  "backend": "advanced",
+  "chunk_count": 208,
+  "vector_dimensions": 3072,
+  "knowledge_base_path": "c:\\Users\\aswat\\Documents\\skybook_app\\ai_agent\\knowledge-base",
+  "vector_path": "c:\\Users\\aswat\\Documents\\skybook_app\\ai_agent\\vector_db",
+  "chroma_path": "c:\\Users\\aswat\\Documents\\skybook_app\\ai_agent\\vector_db\\preprocessed_db",
+  "collection_name": "skynest_docs",
+  "embedding_model": "text-embedding-3-large",
+  "chunk_model": "gpt-4.1-nano"
+}

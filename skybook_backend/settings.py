@@ -119,8 +119,15 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-AI_VECTOR_DB_PATH = os.getenv("AI_VECTOR_DB_PATH", str(BASE_DIR / "vector_db_large"))
-AI_KNOWLEDGE_BASE_PATH = os.getenv("AI_KNOWLEDGE_BASE_PATH", str(BASE_DIR / "knowledge-base"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
+AI_VECTOR_DB_PATH = os.getenv("AI_VECTOR_DB_PATH") or str(BASE_DIR / "ai_agent" / "vector_db")
+AI_KNOWLEDGE_BASE_PATH = os.getenv("AI_KNOWLEDGE_BASE_PATH") or str(BASE_DIR / "ai_agent" / "knowledge-base")
+AI_CHROMA_DB_PATH = os.getenv("AI_CHROMA_DB_PATH") or str(Path(AI_VECTOR_DB_PATH) / "preprocessed_db")
+AI_RAG_COLLECTION_NAME = os.getenv("AI_RAG_COLLECTION_NAME", "skynest_docs")
+AI_RAG_BUILD_BACKEND = os.getenv("AI_RAG_BUILD_BACKEND", "advanced")
 
 FLIGHT_PROVIDER = os.getenv("FLIGHT_PROVIDER", "local_db")
 HOTEL_PROVIDER = os.getenv("HOTEL_PROVIDER", "local_db")
@@ -133,8 +140,11 @@ CAR_PROVIDER_API_KEY = os.getenv("CAR_PROVIDER_API_KEY", "")
 FLIGHT_PROVIDER_BASE_URL = os.getenv("FLIGHT_PROVIDER_BASE_URL", "")
 HOTEL_PROVIDER_BASE_URL = os.getenv("HOTEL_PROVIDER_BASE_URL", "")
 CAR_PROVIDER_BASE_URL = os.getenv("CAR_PROVIDER_BASE_URL", "")
+HOTEL_PROVIDER_DOMAIN = os.getenv("HOTEL_PROVIDER_DOMAIN", "AR")
+HOTEL_PROVIDER_LOCALE = os.getenv("HOTEL_PROVIDER_LOCALE", "es_AR")
 
 PROVIDER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("PROVIDER_REQUEST_TIMEOUT_SECONDS", "15"))
+LLM_REQUEST_TIMEOUT_SECONDS = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "12"))
 ENABLE_MOCK_PROVIDERS = os.getenv("ENABLE_MOCK_PROVIDERS", "true").lower() == "true"
 FLIGHT_SEARCH_CACHE_TTL_SECONDS = int(os.getenv("FLIGHT_SEARCH_CACHE_TTL_SECONDS", "300"))
 HOTEL_SEARCH_CACHE_TTL_SECONDS = int(os.getenv("HOTEL_SEARCH_CACHE_TTL_SECONDS", "1800"))
@@ -147,3 +157,13 @@ ADMIN_NAME = os.getenv("ADMIN_NAME", "SkyBook Admin").strip()
 ADMIN_TOKEN_TTL_SECONDS = int(os.getenv("ADMIN_TOKEN_TTL_SECONDS", "28800"))
 ADMIN_MAX_FAILED_ATTEMPTS = int(os.getenv("ADMIN_MAX_FAILED_ATTEMPTS", "5"))
 ADMIN_LOCKOUT_MINUTES = int(os.getenv("ADMIN_LOCKOUT_MINUTES", "15"))
+
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "SkyBook <no-reply@skybook.test>")
+BOOKING_CONFIRMATION_EMAILS_ENABLED = os.getenv("BOOKING_CONFIRMATION_EMAILS_ENABLED", "true").lower() == "true"

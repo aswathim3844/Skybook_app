@@ -1,0 +1,7 @@
+{
+  "chunk_count": 332,
+  "vector_dimensions": 384,
+  "knowledge_base_path": "c:\\Users\\aswat\\Documents\\skybook_app\\ai_agent\\knowledge-base",
+  "vector_path": "c:\\Users\\aswat\\Documents\\skybook_app\\ai_agent\\vector_db",
+  "embedding_model": "all-MiniLM-L6-v2"
+}

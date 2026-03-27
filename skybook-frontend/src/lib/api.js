@@ -73,6 +73,43 @@ function normalizeLocationInput(value) {
     .trim();
 }
 
+function extractAirportCode(value) {
+  if (!value) {
+    return "";
+  }
+
+  const match = String(value).match(/\(([A-Za-z]{3})\)\s*$/);
+  if (match) {
+    return match[1].toUpperCase();
+  }
+
+  return normalizeLocationInput(value).toUpperCase();
+}
+
+function parseTimeToMinutes(value) {
+  const match = String(value || "").match(/(\d{1,2}):(\d{2})/);
+  if (!match) {
+    return null;
+  }
+
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function parseDurationToMinutes(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const compactMatch = text.match(/(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?/i);
+  if (compactMatch && (compactMatch[1] || compactMatch[2])) {
+    return Number(compactMatch[1] || 0) * 60 + Number(compactMatch[2] || 0);
+  }
+
+  const numericMatch = text.match(/(\d+)/);
+  return numericMatch ? Number(numericMatch[1]) : null;
+}
+
 export function mapFlight(flight, index = 0) {
   const accents = [
     "from-sky-500 to-cyan-400",
@@ -92,34 +129,64 @@ export function mapFlight(flight, index = 0) {
     price: Number(flight.price || flight.base_price || 0),
     logo: flight.logo || (flight.airline || "SK").slice(0, 2).toUpperCase(),
     accent: accents[index % accents.length],
+    sourceLabel: flight.provider === "serpapi" ? "Live price" : "Database price",
+    departureMinutes: parseTimeToMinutes(flight.departure_time_display),
+    durationMinutes: Number(flight.duration_minutes || parseDurationToMinutes(flight.duration_display) || 0),
+    stopCount:
+      typeof flight.stop_count === "number"
+        ? flight.stop_count
+        : String(flight.stops || "").toLowerCase().includes("nonstop")
+          ? 0
+          : 1,
   };
 }
 
 export function mapHotel(hotel, index = 0) {
+  const pricingPending = Boolean(hotel.pricing_pending || hotel.is_discovery_result);
+  const nightlyPrice = pricingPending ? null : Number(hotel.price_per_night || 0);
+
   return {
     id: String(hotel.hotel_id),
     name: hotel.hotel_name || "Hotel",
     rating: hotel.rating || 0,
-    pricePerDay: Number(hotel.price_per_night || 0),
+    pricePerDay: nightlyPrice,
     location: `${hotel.city || "City"}${hotel.country_name ? `, ${hotel.country_name}` : ""}`,
-    details: hotel.description || "Real hotel data from PostgreSQL",
+    details:
+      hotel.description ||
+      (pricingPending
+        ? "Live discovery result. Select it to check room offers and final pricing."
+        : "Real hotel data from PostgreSQL"),
     image: hotel.image_url
       ? `linear-gradient(135deg, rgba(15,23,42,0.12), rgba(15,23,42,0.28)), url("${hotel.image_url}")`
       : hotelGradients[index % hotelGradients.length],
+    pricingPending,
+    priceLabel: hotel.price_display || null,
+    providerMetadata: hotel.provider_metadata || null,
+    isDiscoveryResult: Boolean(hotel.is_discovery_result),
+    isFallbackPrice: Boolean(hotel.is_fallback_price),
+    sourceLabel: hotel.is_fallback_price ? "Reference price" : pricingPending ? "Price pending" : "Live price",
   };
 }
 
 export function mapCar(car, index = 0) {
+  const seats = Number(car.car_seats || 4);
+  const availability = car.availability !== false;
+  const carType = car.car_type || "Standard";
+
   return {
     id: String(car.car_id),
     name: `${car.company || "Rental"} ${car.car_model || "Car"}`.trim(),
     rating: 4.5,
     pricePerDay: Number(car.price_per_day || 0),
-    type: `${car.car_type || "Standard"} | ${car.car_seats || 4} seats${car.availability === false ? " | unavailable" : ""}`,
+    type: `${carType} | ${seats} seats${availability ? "" : " | unavailable"}`,
     details: car.description || `Pickup in ${car.city || "selected city"}`,
     image: car.image_url
       ? `linear-gradient(135deg, rgba(15,23,42,0.12), rgba(15,23,42,0.28)), url("${car.image_url}")`
       : carGradients[index % carGradients.length],
+    sourceLabel: "Available now",
+    seats,
+    availability,
+    carType,
   };
 }
 
@@ -129,9 +196,22 @@ export function mapBooking(booking) {
 
   return {
     id: booking.booking_id,
+    booking_reference: booking.booking_reference || `SNA${String(booking.booking_id || "").padStart(6, "0")}`,
+    booking_status: booking.booking_status || "Confirmed",
+    total_price: booking.total_price || 0,
+    created_at: booking.created_at || null,
+    outbound_date: booking.outbound_date || "",
+    return_date: booking.return_date || "",
+    flight_details: booking.flight_details || null,
+    return_flight_details: booking.return_flight_details || null,
+    hotel_details: booking.hotel_details || null,
+    car_details: booking.car_details || null,
+    booking_metadata: booking.booking_metadata || {},
     destination:
       booking.hotel_details?.city ||
+      booking.booking_metadata?.selected_hotel?.city ||
       booking.flight_details?.arrival_city ||
+      booking.booking_metadata?.selected_flight?.arrival_city ||
       "Planned trip",
     dates:
       outboundDate && returnDate
@@ -147,22 +227,50 @@ export function mapBooking(booking) {
 }
 
 export async function fetchFlights(search) {
-  const params = new URLSearchParams({
-    from: normalizeLocationInput(search.from),
-    to: normalizeLocationInput(search.to),
-    departure: search.departure || "",
+  const data = await request("/flights/search", {
+    method: "POST",
+    body: JSON.stringify({
+      origin: extractAirportCode(search.from),
+      destination: extractAirportCode(search.to),
+      departure_date: search.departure || "",
+      return_date: search.returnDate || "",
+      seat_class: search.seatClass || "Economy",
+      min_seats: 1,
+    }),
   });
-
-  const data = await request(`/flights/?${params.toString()}`);
   return data.map(mapFlight);
 }
 
 export async function fetchHotels(search) {
+  const data = await request("/hotels/search", {
+    method: "POST",
+    body: JSON.stringify({
+      city: normalizeLocationInput(search.to),
+      hotel_rating: search.hotelRating || "Any",
+      adults_number: extractPassengerCount(search.passengers),
+    }),
+  });
+  return data.map(mapHotel);
+}
+
+export async function fetchHotelOffer(payload) {
+  return request("/hotels/offers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchReferenceHotels(search) {
   const params = new URLSearchParams({
     city: normalizeLocationInput(search.to),
   });
 
   const data = await request(`/hotels/?${params.toString()}`);
+  return data.map(mapHotel);
+}
+
+export async function fetchAllHotels() {
+  const data = await request("/hotels/");
   return data.map(mapHotel);
 }
 
@@ -203,6 +311,10 @@ export async function fetchFlightLocations() {
   return request("/flight-locations/");
 }
 
+export async function fetchFlightRoutes() {
+  return request("/flight-routes/");
+}
+
 export async function sendAIChatMessage(payload) {
   return request("/chat", {
     method: "POST",
@@ -237,6 +349,13 @@ export async function generatePlannerSessionPlan(sessionId, payload) {
   return request(`/planner/sessions/${sessionId}/plan/`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export async function enrichPlannerDraft(sessionId, draftId) {
+  return request(`/planner/sessions/${sessionId}/drafts/${draftId}/enrich/`, {
+    method: "POST",
+    body: JSON.stringify({}),
   });
 }
 
@@ -321,4 +440,9 @@ export async function updateAccount(customerId, payload) {
 export async function fetchCustomerBookings(customerId) {
   const data = await request(`/bookings/?customer_id=${customerId}`);
   return data.map(mapBooking);
+}
+
+function extractPassengerCount(value) {
+  const match = String(value || "").match(/\d+/);
+  return match ? Number(match[0]) : 1;
 }
