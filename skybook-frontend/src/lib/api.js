@@ -153,9 +153,9 @@ export function mapHotel(hotel, index = 0) {
     location: `${hotel.city || "City"}${hotel.country_name ? `, ${hotel.country_name}` : ""}`,
     details:
       hotel.description ||
-      (pricingPending
-        ? "Live discovery result. Select it to check room offers and final pricing."
-        : "Real hotel data from PostgreSQL"),
+        (pricingPending
+          ? "Live discovery result. Select it to check room offers and final pricing."
+          : "Available stay details and pricing"),
     image: hotel.image_url
       ? `linear-gradient(135deg, rgba(15,23,42,0.12), rgba(15,23,42,0.28)), url("${hotel.image_url}")`
       : hotelGradients[index % hotelGradients.length],
@@ -292,6 +292,18 @@ export async function fetchBookings(customerId) {
   const suffix = customerId ? `?customer_id=${customerId}` : "";
   const data = await request(`/bookings/${suffix}`);
   return data.map(mapBooking);
+}
+
+export async function cancelBooking(reference, customerId) {
+  const data = await request(`/bookings/${encodeURIComponent(reference)}/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      action: "cancel",
+      customer_id: customerId,
+    }),
+  });
+
+  return mapBooking(data);
 }
 
 export async function createBooking(payload) {

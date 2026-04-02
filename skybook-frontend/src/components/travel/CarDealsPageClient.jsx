@@ -10,14 +10,19 @@ import { buildBookingQuery, defaultBookingSearch, useBookingStore } from "@/lib/
 import { fetchAllCars } from "@/lib/api";
 import { formatCurrency, getTripDuration } from "@/lib/mock-data";
 
-export default function CarDealsPageClient({ initialCarId = "" }) {
+export default function CarDealsPageClient({
+  initialCarId = "",
+  initialDeparture = "",
+  initialReturn = "",
+}) {
   const router = useRouter();
   const setSearch = useBookingStore((state) => state.setSearch);
   const selectCar = useBookingStore((state) => state.selectCar);
   const [cars, setCars] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedCarId, setSelectedCarId] = useState(initialCarId || "");
-  const [rentalDays, setRentalDays] = useState(Math.max(getTripDuration(defaultBookingSearch.departure, defaultBookingSearch.returnDate), 1));
+  const [pickupDate, setPickupDate] = useState(initialDeparture || defaultBookingSearch.departure);
+  const [dropoffDate, setDropoffDate] = useState(initialReturn || defaultBookingSearch.returnDate);
   const [filters, setFilters] = useState({
     city: "all",
     maxPrice: "",
@@ -97,6 +102,12 @@ export default function CarDealsPageClient({ initialCarId = "" }) {
     null;
 
   useEffect(() => {
+    if (dropoffDate && pickupDate && dropoffDate < pickupDate) {
+      setDropoffDate(pickupDate);
+    }
+  }, [dropoffDate, pickupDate]);
+
+  useEffect(() => {
     if (!selectedCar) {
       return;
     }
@@ -106,17 +117,17 @@ export default function CarDealsPageClient({ initialCarId = "" }) {
       tripType: "car-only",
       from: "",
       to: selectedCar.details?.replace(/^Pickup in\s+/i, "").trim() || "",
-      departure: defaultBookingSearch.departure,
-      returnDate: addDays(defaultBookingSearch.departure, rentalDays),
+      departure: pickupDate,
+      returnDate: dropoffDate,
       passengers: "2 Adults",
       multiCitySegments: [],
     };
 
     setSearch(search);
     selectCar(selectedCar);
-  }, [rentalDays, selectCar, selectedCar, setSearch]);
+  }, [dropoffDate, pickupDate, selectCar, selectedCar, setSearch]);
 
-  const duration = Math.max(rentalDays, 1);
+  const duration = Math.max(getTripDuration(pickupDate, dropoffDate), 1);
   const carTotal = Number(selectedCar?.pricePerDay || 0) * duration;
   const paymentHref = selectedCar
     ? `/payment?${buildBookingQuery({
@@ -125,8 +136,8 @@ export default function CarDealsPageClient({ initialCarId = "" }) {
           tripType: "car-only",
           from: "",
           to: selectedCar.details?.replace(/^Pickup in\s+/i, "").trim() || "",
-          departure: defaultBookingSearch.departure,
-          returnDate: addDays(defaultBookingSearch.departure, duration),
+          departure: pickupDate,
+          returnDate: dropoffDate,
           passengers: "2 Adults",
           multiCitySegments: [],
         },
@@ -265,14 +276,23 @@ export default function CarDealsPageClient({ initialCarId = "" }) {
                     {formatCurrency(Number(selectedCar?.pricePerDay || 0))}
                   </span>
                 </div>
-                <label className="flex items-center justify-between gap-3">
-                  <span>Days</span>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-600">Pickup date</span>
                   <input
-                    type="number"
-                    min="1"
-                    value={rentalDays}
-                    onChange={(event) => setRentalDays(Math.max(1, Number(event.target.value) || 1))}
-                    className="min-h-10 w-24 rounded-[14px] border border-slate-200 bg-slate-50 px-3 text-right text-slate-900 outline-none"
+                    type="date"
+                    value={pickupDate}
+                    onChange={(event) => setPickupDate(event.target.value)}
+                    className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-600">Dropoff date</span>
+                  <input
+                    type="date"
+                    min={pickupDate}
+                    value={dropoffDate}
+                    onChange={(event) => setDropoffDate(event.target.value)}
+                    className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
                   />
                 </label>
                 <div className="flex items-center justify-between">
@@ -296,10 +316,4 @@ export default function CarDealsPageClient({ initialCarId = "" }) {
       <SiteFooter />
     </main>
   );
-}
-
-function addDays(dateString, days) {
-  const date = new Date(dateString);
-  date.setDate(date.getDate() + Math.max(days, 1));
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }

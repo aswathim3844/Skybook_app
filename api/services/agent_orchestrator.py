@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -81,42 +82,72 @@ class PlannerAgentOrchestrator:
             per_night_hotel_cap = float((budget_decimal * Decimal("0.40")) / Decimal(nights))
             per_day_car_cap = float((budget_decimal * Decimal("0.15")) / Decimal(nights))
 
-        flight_result = self.specialists.run_flight_agent(
-            origin=flight_origin,
-            destination=flight_destination,
-            passengers=passengers,
-            seat_class=seat_class,
-        )
-        return_flight_result = self.specialists.run_flight_agent(
-            origin=flight_destination,
-            destination=flight_origin,
-            passengers=passengers,
-            seat_class=seat_class,
-        )
-        hotel_result = self.specialists.run_hotel_agent(
-            destination=destination,
-            passengers=passengers,
-            max_price=per_night_hotel_cap,
-        )
-        car_result = self.specialists.run_car_agent(
-            destination=destination,
-            passengers=passengers,
-            max_price=per_day_car_cap,
-            car_type=preferences.get("car_type"),
-        )
+        # Run structured inventory search and qualitative tasks in parallel so draft generation
+        # stays responsive while preserving Python-owned pricing and selection.
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            flight_future = executor.submit(
+                self.specialists.run_flight_agent,
+                origin=flight_origin,
+                destination=flight_destination,
+                passengers=passengers,
+                seat_class=seat_class,
+            )
+            return_flight_future = executor.submit(
+                self.specialists.run_flight_agent,
+                origin=flight_destination,
+                destination=flight_origin,
+                passengers=passengers,
+                seat_class=seat_class,
+            )
+            hotel_future = executor.submit(
+                self.specialists.run_hotel_agent,
+                destination=destination,
+                passengers=passengers,
+                max_price=per_night_hotel_cap,
+            )
+            car_future = executor.submit(
+                self.specialists.run_car_agent,
+                destination=destination,
+                passengers=passengers,
+                max_price=per_day_car_cap,
+                car_type=preferences.get("car_type"),
+            )
+            visa_future = executor.submit(
+                self.specialists.run_kb_agent,
+                question=f"Visa requirements for {origin or 'travellers'} to {destination}"
+                if destination
+                else "Visa requirements for travellers",
+                history=history,
+            )
+            baggage_future = executor.submit(
+                self.specialists.run_kb_agent,
+                question=f"SkyBook baggage policy for {seat_class}",
+                history=history,
+            )
+            destination_future = executor.submit(
+                self.specialists.run_kb_agent,
+                question=f"Top highlights and travel tips for {destination}"
+                if destination
+                else "Travel tips",
+                history=history,
+            )
+            itinerary_future = executor.submit(
+                self._build_itinerary,
+                destination=destination,
+                origin=origin,
+                nights=nights,
+                trip_type=trip_type,
+                budget=budget_decimal,
+            )
 
-        visa_result = self.specialists.run_kb_agent(
-            question=f"Visa requirements for {origin or 'travellers'} to {destination}",
-            history=history,
-        ) if destination else self.specialists.run_kb_agent(question="Visa requirements for travellers", history=history)
-        baggage_result = self.specialists.run_kb_agent(
-            question=f"SkyBook baggage policy for {seat_class}",
-            history=history,
-        )
-        destination_result = self.specialists.run_kb_agent(
-            question=f"Top highlights and travel tips for {destination}",
-            history=history,
-        ) if destination else self.specialists.run_kb_agent(question="Travel tips", history=history)
+            flight_result = flight_future.result()
+            return_flight_result = return_flight_future.result()
+            hotel_result = hotel_future.result()
+            car_result = car_future.result()
+            visa_result = visa_future.result()
+            baggage_result = baggage_future.result()
+            destination_result = destination_future.result()
+            itinerary = itinerary_future.result()
 
         outbound_flights = flight_result.payload.get("results", [])
         return_flights = return_flight_result.payload.get("results", [])
@@ -136,13 +167,6 @@ class PlannerAgentOrchestrator:
             departure_date=departure_date,
             return_date=return_date,
             passengers=passengers,
-        )
-        itinerary = self._build_itinerary(
-            destination=destination,
-            origin=origin,
-            nights=nights,
-            trip_type=trip_type,
-            budget=budget_decimal,
         )
         knowledge = {
             "visa_info": visa_result.payload.get("answer"),

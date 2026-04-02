@@ -89,6 +89,36 @@ export const useBookingStore = create(
           selectedCarId: car?.id || null,
           selectedCar: car || null,
         }),
+      clearFlight: () =>
+        set({
+          selectedFlightId: null,
+          selectedReturnFlightId: null,
+          selectedHotelId: null,
+          selectedCarId: null,
+          selectedFlight: null,
+          selectedReturnFlight: null,
+          selectedHotel: null,
+          selectedCar: null,
+        }),
+      clearReturnFlight: () =>
+        set({
+          selectedReturnFlightId: null,
+          selectedReturnFlight: null,
+          selectedHotelId: null,
+          selectedCarId: null,
+          selectedHotel: null,
+          selectedCar: null,
+        }),
+      clearHotel: () =>
+        set({
+          selectedHotelId: null,
+          selectedHotel: null,
+        }),
+      clearCar: () =>
+        set({
+          selectedCarId: null,
+          selectedCar: null,
+        }),
       hydrateFromParams: (params) =>
         set((state) => ({
           search: {

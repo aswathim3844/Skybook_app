@@ -18,7 +18,6 @@ import { useAuthStore } from "@/lib/auth-store";
 
 const accountLinks = [
   { label: "My account", href: "/account", icon: UserRound },
-  { label: "Loyalty dashboard", href: "/loyalty", icon: BadgePercent },
   { label: "Saved", href: "/saved", icon: Heart },
   { label: "Upcoming trips", href: "/my-bookings", icon: Ticket },
 ];
@@ -117,10 +116,10 @@ const Navbar = ({ heroStyle = false }) => {
                     <Link href="/loyalty" className="flex items-center justify-between rounded-2xl px-4 py-3 transition hover:bg-slate-50">
                       <span className="flex items-center gap-3">
                         <BadgePercent className="h-4 w-4 text-slate-500" />
-                        Loyalty points
+                        Miles & rewards
                       </span>
                       <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
-                        {summary?.loyalty_points || 0}
+                        {(summary?.loyalty_miles ?? summary?.loyalty_points ?? 0).toLocaleString()}
                       </span>
                     </Link>
 
@@ -181,7 +180,7 @@ const Navbar = ({ heroStyle = false }) => {
                   </Link>
                 ))}
                 <Link href="/loyalty" className="rounded-2xl bg-white/10 px-4 py-3 text-sm font-semibold">
-                  Loyalty points: {summary?.loyalty_points || 0}
+                  Miles & rewards: {(summary?.loyalty_miles ?? summary?.loyalty_points ?? 0).toLocaleString()}
                 </Link>
                 <button
                   onClick={() => {

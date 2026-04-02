@@ -3,19 +3,22 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { setAdminCookie, useAdminStore } from "@/lib/admin-store";
+import { hasPermission } from "@/components/admin/formatters";
 
 const navItems = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/bookings", label: "Bookings" },
-  { href: "/flights", label: "Flights" },
-  { href: "/hotels", label: "Hotels" },
-  { href: "/cars", label: "Cars" },
+  { href: "/dashboard", label: "Dashboard", permission: "dashboard.read" },
+  { href: "/bookings", label: "Bookings", permission: "bookings.read" },
+  { href: "/flights", label: "Flights", permission: "flights.read" },
+  { href: "/hotels", label: "Hotels", permission: "hotels.read" },
+  { href: "/cars", label: "Cars", permission: "cars.read" },
+  { href: "/admin-users", label: "Admin Users", permission: "admin_users.read" },
 ];
 
 export default function AdminLayoutShell({ title, description, children }) {
   const pathname = usePathname();
   const router = useRouter();
   const admin = useAdminStore((state) => state.admin);
+  const permissions = useAdminStore((state) => state.permissions);
   const clearAdminAuth = useAdminStore((state) => state.clearAdminAuth);
 
   return (
@@ -48,6 +51,9 @@ export default function AdminLayoutShell({ title, description, children }) {
             <aside className="rounded-[28px] border border-white/10 bg-slate-950/30 p-4">
               <div className="grid gap-2">
                 {navItems.map((item) => {
+                  if (item.permission && !hasPermission(permissions, item.permission)) {
+                    return null;
+                  }
                   const active = pathname === item.href;
                   return (
                     <Link

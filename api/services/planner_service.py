@@ -969,7 +969,6 @@ def parse_prompt_trip_request(message: str) -> dict[str, Any] | None:
         "budget": budget,
     }
 
-
 def clean_location(value: Any) -> str | None:
     if value is None:
         return None

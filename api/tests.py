@@ -6,7 +6,7 @@ from unittest.mock import patch
 from django.core import mail
 from django.test import TestCase
 from django.test import override_settings
-from django.contrib.auth.hashers import make_password
+from django.contrib.auth.hashers import check_password, make_password
 from rest_framework.test import APIClient
 
 from api.models import (
@@ -279,6 +279,25 @@ class BookingReferenceTests(TestCase):
             "Dubai Marina Hotel",
         )
 
+    def test_booking_creation_requires_resolved_customer(self):
+        response = self.client.post(
+            "/api/bookings/",
+            {
+                "check_in": "2026-04-10",
+                "check_out": "2026-04-15",
+                "passengers": 1,
+                "seat_class": "Economy",
+                "total_price": "730.00",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["message"],
+            "A valid signed-in customer is required to create a booking.",
+        )
+
     def test_booking_creation_normalizes_local_inventory_provider_snapshot(self):
         departure_airport = Airports.objects.create(
             airport_name="Chhatrapati Shivaji Maharaj International Airport",
@@ -540,6 +559,86 @@ class AdminApiTests(TestCase):
             format="json",
         )
         self.assertEqual(refund_response.status_code, 403)
+
+    def test_super_admin_can_create_update_and_deactivate_admin_users(self):
+        token = self.authenticate_admin()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        inventory_role = AdminRoles.objects.get(code="inventory_admin")
+        ops_role = AdminRoles.objects.get(code="ops_admin")
+
+        create_response = self.client.post(
+            "/api/admin/users/",
+            {
+                "email": "teamlead@skybook.test",
+                "full_name": "Team Lead",
+                "password": "TeamLead@123",
+                "role_id": inventory_role.role_id,
+                "is_active": True,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, 201)
+        created_admin_id = create_response.json()["admin_user_id"]
+        created_admin = AdminUsers.objects.get(pk=created_admin_id)
+        self.assertTrue(check_password("TeamLead@123", created_admin.password_hash))
+        self.assertEqual(created_admin.role_id, inventory_role.role_id)
+
+        update_response = self.client.patch(
+            f"/api/admin/users/{created_admin_id}/",
+            {
+                "email": "teamlead.updated@skybook.test",
+                "full_name": "Team Lead Updated",
+                "password": "Updated@123",
+                "role_id": ops_role.role_id,
+                "is_active": False,
+            },
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+        created_admin.refresh_from_db()
+        self.assertEqual(created_admin.email, "teamlead.updated@skybook.test")
+        self.assertEqual(created_admin.full_name, "Team Lead Updated")
+        self.assertEqual(created_admin.role_id, ops_role.role_id)
+        self.assertFalse(created_admin.is_active)
+        self.assertTrue(check_password("Updated@123", created_admin.password_hash))
+        self.assertTrue(AdminAuditLogs.objects.filter(action="admin_user_create").exists())
+        self.assertTrue(AdminAuditLogs.objects.filter(action="admin_user_update").exists())
+
+    def test_ops_admin_cannot_access_admin_users(self):
+        self.authenticate_admin()
+        ops_role = AdminRoles.objects.get(code="ops_admin")
+        ops_admin = AdminUsers.objects.create(
+            role=ops_role,
+            email="ops-manager@skybook.test",
+            full_name="Ops Manager",
+            password_hash=make_password("OpsManager@123"),
+            is_active=True,
+        )
+
+        response = self.client.post(
+            "/api/admin/auth/login/",
+            {"email": ops_admin.email, "password": "OpsManager@123"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        token = response.json()["token"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        list_response = self.client.get("/api/admin/users/")
+        self.assertEqual(list_response.status_code, 403)
+
+        create_response = self.client.post(
+            "/api/admin/users/",
+            {
+                "email": "blocked@skybook.test",
+                "full_name": "Blocked User",
+                "password": "Blocked@123",
+                "role_id": ops_role.role_id,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, 403)
 
     @override_settings(ADMIN_MAX_FAILED_ATTEMPTS=2, ADMIN_LOCKOUT_MINUTES=10)
     def test_admin_account_locks_after_failed_attempts(self):

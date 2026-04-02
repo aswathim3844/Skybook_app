@@ -1,19 +1,21 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import SiteFooter from "@/components/travel/SiteFooter";
 import Navbar from "@/components/ui/Navbar";
-import { PageHero } from "@/components/travel/TravelUI";
 import { fetchCountries, loginCustomer, registerCustomer } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 
 const passwordPattern =
   /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/;
 
-export default function AuthPageClient() {
+export default function AuthPageClient({ initialMode = "login" }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const setAuth = useAuthStore((state) => state.setAuth);
+  const isSignupMode = initialMode === "signup";
   const [countries, setCountries] = useState([]);
   const [loginForm, setLoginForm] = useState({
     email: "",
@@ -32,8 +34,13 @@ export default function AuthPageClient() {
   const [registerMessage, setRegisterMessage] = useState("");
   const [submittingLogin, setSubmittingLogin] = useState(false);
   const [submittingRegister, setSubmittingRegister] = useState(false);
+  const redirectTarget = searchParams.get("redirect") || "/account";
 
   useEffect(() => {
+    if (!isSignupMode) {
+      return undefined;
+    }
+
     let active = true;
 
     async function loadCountries() {
@@ -53,7 +60,7 @@ export default function AuthPageClient() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [isSignupMode]);
 
   function updateLoginField(field, value) {
     setLoginForm((current) => ({ ...current, [field]: value }));
@@ -115,7 +122,7 @@ export default function AuthPageClient() {
       setSubmittingLogin(true);
       const response = await loginCustomer(loginForm);
       setAuth(response);
-      router.push("/account");
+      router.push(redirectTarget);
     } catch (error) {
       setLoginMessage(error.payload?.message || "Invalid email or password.");
     } finally {
@@ -147,9 +154,10 @@ export default function AuthPageClient() {
           booking_count: 0,
           upcoming_trips: 0,
           loyalty_points: 0,
+          loyalty_miles: 0,
         },
       });
-      router.push("/account");
+      router.push(redirectTarget);
     } catch (error) {
       setRegisterMessage(
         error.payload?.message || "Could not create account. Check the form and try again."
@@ -165,99 +173,120 @@ export default function AuthPageClient() {
   return (
     <main className="min-h-screen bg-[#f3f7ff]">
       <Navbar />
+      <section className="px-6 py-14 sm:px-8 sm:py-20">
+        <div className="mx-auto max-w-md rounded-[32px] border border-slate-200 bg-white p-7 shadow-[0_24px_70px_rgba(15,23,42,0.12)] sm:p-8">
+          <p className="text-sm font-medium text-slate-400">Please enter your details</p>
+          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-slate-900">
+            {isSignupMode ? "Create account" : "Welcome back"}
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-slate-500">
+            {isSignupMode
+              ? "Create your SkyBook account to save trips, manage bookings, and earn miles."
+              : "Sign in to manage your trips, saved items, and upcoming bookings."}
+          </p>
 
-      <PageHero
-        eyebrow="Account"
-        title="Login or create an account"
-        description="This is now connected to PostgreSQL. Sign in uses your email and password, and registration writes directly into the customers table."
-      >
-        <div className="rounded-[32px] border border-white/15 bg-white/10 p-5 backdrop-blur-sm">
-          <div className="rounded-[28px] border border-white/15 bg-slate-950/20 p-6 text-white">
-            <p className="text-sm uppercase tracking-[0.22em] text-orange-300">SkyBook access</p>
-            <p className="mt-4 text-2xl font-semibold">Your account unlocks bookings, wishlist, and trip history</p>
+          <div className="mt-8 space-y-4">
+            <Input
+              label="Email address"
+              type="email"
+              value={isSignupMode ? registerForm.email : loginForm.email}
+              onChange={(event) =>
+                isSignupMode
+                  ? updateRegisterField("email", event.target.value)
+                  : updateLoginField("email", event.target.value)
+              }
+              error={isSignupMode ? registerErrors.email : loginErrors.email}
+            />
+
+            <Input
+              label={isSignupMode ? "Strong password" : "Password"}
+              type="password"
+              value={isSignupMode ? registerForm.password : loginForm.password}
+              onChange={(event) =>
+                isSignupMode
+                  ? updateRegisterField("password", event.target.value)
+                  : updateLoginField("password", event.target.value)
+              }
+              error={isSignupMode ? registerErrors.password : loginErrors.password}
+            />
+
+            {isSignupMode ? (
+              <>
+                <Input
+                  label="Re-enter password"
+                  type="password"
+                  value={registerForm.confirmPassword}
+                  onChange={(event) => updateRegisterField("confirmPassword", event.target.value)}
+                  error={registerErrors.confirmPassword}
+                />
+                <Input
+                  label="Phone number"
+                  type="text"
+                  value={registerForm.phone}
+                  onChange={(event) => updateRegisterField("phone", event.target.value)}
+                  error={registerErrors.phone}
+                />
+                <Select
+                  label="Country"
+                  value={registerForm.country}
+                  onChange={(event) => updateRegisterField("country", event.target.value)}
+                  error={registerErrors.country}
+                  options={countries}
+                />
+              </>
+            ) : null}
+
+            <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+              <label className="inline-flex items-center gap-2">
+                <input type="checkbox" className="h-4 w-4 rounded border-slate-300" />
+                Remember for 30 days
+              </label>
+              {!isSignupMode ? (
+                <span className="text-[#3b82f6]">Forgot password</span>
+              ) : null}
+            </div>
+
+            {isSignupMode
+              ? registerMessage
+                ? <MessageBox tone="error" text={registerMessage} />
+                : null
+              : loginMessage
+                ? <MessageBox tone="error" text={loginMessage} />
+                : null}
+
+            <button
+              onClick={isSignupMode ? handleRegister : handleLogin}
+              disabled={isSignupMode ? submittingRegister : submittingLogin}
+              className="inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-[#3b82f6] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#2563eb] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSignupMode
+                ? submittingRegister
+                  ? "Creating account..."
+                  : "Create account"
+                : submittingLogin
+                  ? "Signing in..."
+                  : "Sign in"}
+            </button>
+
+            <div className="pt-1 text-center text-sm text-slate-500">
+              {isSignupMode ? (
+                <>
+                  Already have an account?{" "}
+                  <Link href={`/login?redirect=${encodeURIComponent(redirectTarget)}`} className="font-semibold text-[#3b82f6]">
+                    Sign in
+                  </Link>
+                </>
+              ) : (
+                <>
+                  Don&apos;t have an account?{" "}
+                  <Link href={`/signup?redirect=${encodeURIComponent(redirectTarget)}`} className="font-semibold text-[#3b82f6]">
+                    Sign up
+                  </Link>
+                </>
+              )}
+            </div>
           </div>
         </div>
-      </PageHero>
-
-      <section className="mx-auto grid max-w-7xl gap-8 px-6 py-16 sm:px-8 lg:grid-cols-2 lg:px-12">
-        <article className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">Sign in</p>
-          <div className="mt-6 space-y-4">
-            <Input
-              label="Email address"
-              type="email"
-              value={loginForm.email}
-              onChange={(event) => updateLoginField("email", event.target.value)}
-              error={loginErrors.email}
-            />
-            <Input
-              label="Password"
-              type="password"
-              value={loginForm.password}
-              onChange={(event) => updateLoginField("password", event.target.value)}
-              error={loginErrors.password}
-            />
-            {loginMessage ? <MessageBox tone="error" text={loginMessage} /> : null}
-            <button
-              onClick={handleLogin}
-              disabled={submittingLogin}
-              className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-orange-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {submittingLogin ? "Signing in..." : "Sign in"}
-            </button>
-          </div>
-        </article>
-
-        <article className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">Create account</p>
-          <div className="mt-6 space-y-4">
-            <Input
-              label="Email address"
-              type="email"
-              value={registerForm.email}
-              onChange={(event) => updateRegisterField("email", event.target.value)}
-              error={registerErrors.email}
-            />
-            <Input
-              label="Strong password"
-              type="password"
-              value={registerForm.password}
-              onChange={(event) => updateRegisterField("password", event.target.value)}
-              error={registerErrors.password}
-            />
-            <Input
-              label="Re-enter password"
-              type="password"
-              value={registerForm.confirmPassword}
-              onChange={(event) =>
-                updateRegisterField("confirmPassword", event.target.value)
-              }
-              error={registerErrors.confirmPassword}
-            />
-            <Input
-              label="Phone number"
-              type="text"
-              value={registerForm.phone}
-              onChange={(event) => updateRegisterField("phone", event.target.value)}
-              error={registerErrors.phone}
-            />
-            <Select
-              label="Country"
-              value={registerForm.country}
-              onChange={(event) => updateRegisterField("country", event.target.value)}
-              error={registerErrors.country}
-              options={countries}
-            />
-            {registerMessage ? <MessageBox tone="error" text={registerMessage} /> : null}
-            <button
-              onClick={handleRegister}
-              disabled={submittingRegister}
-              className="inline-flex min-h-12 w-full items-center justify-center rounded-full border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {submittingRegister ? "Creating account..." : "Create account"}
-            </button>
-          </div>
-        </article>
       </section>
 
       <SiteFooter />

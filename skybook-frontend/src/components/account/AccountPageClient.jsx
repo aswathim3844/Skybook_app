@@ -178,7 +178,7 @@ export default function AccountPageClient() {
       <PageHero
         eyebrow="My Account"
         title={`Welcome, ${customer.name || customer.email}`}
-        description="This page now lets the signed-in user view and edit their basic account details stored in PostgreSQL."
+        description="Keep your profile details up to date so planning and booking stays simple."
       >
         <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
           <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Basic profile</p>
@@ -199,7 +199,7 @@ export default function AccountPageClient() {
             label="Wishlist items"
             value={savedFlights.length + savedHotels.length + savedCars.length}
           />
-          <SummaryCard label="Loyalty points" value={summary?.loyalty_points || 0} />
+          <SummaryCard label="Loyalty miles" value={summary?.loyalty_miles ?? summary?.loyalty_points ?? 0} />
         </div>
 
         <div className="mt-8 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">

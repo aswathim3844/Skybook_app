@@ -17,11 +17,13 @@ from .admin_security import (
     issue_admin_token,
     log_admin_event,
     require_admin,
+    serialize_admin_management_user,
     serialize_admin_user,
     serialize_role,
 )
 from .models import (
     AdminRoles,
+    AdminUsers,
     Airports,
     Flights,
     Hotels,
@@ -177,6 +179,11 @@ def get_bookings(request):
         customer_id = customer.customer_id
 
     customer_id = validate_related_id(Customers, customer_id)
+    if customer_id is None:
+        return Response(
+            {"message": "A valid signed-in customer is required to create a booking."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     flight_id = validate_related_id(Flights, flight_id)
     return_flight_id = validate_related_id(Flights, return_flight_id)
     hotel_id = validate_related_id(Hotels, hotel_id)
@@ -741,7 +748,7 @@ def search_cars(request):
     return Response(cars[:8])
 
 
-@api_view(["GET"])
+@api_view(["GET", "PATCH"])
 def retrieve_booking(request, reference):
     booking_id = parse_booking_reference(reference)
     if booking_id is None:
@@ -763,6 +770,37 @@ def retrieve_booking(request, reference):
 
     if booking is None:
         return Response({"message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "PATCH":
+        action = (request.data.get("action") or "").strip().lower()
+        customer_id = parse_int_value(request.data.get("customer_id"))
+
+        if action != "cancel":
+            return Response({"message": "Unsupported booking action."}, status=status.HTTP_400_BAD_REQUEST)
+        if customer_id is None or booking.customer_id != customer_id:
+            return Response({"message": "You are not allowed to update this booking."}, status=status.HTTP_403_FORBIDDEN)
+        if (booking.booking_status or "").lower() in {"cancelled", "refunded"}:
+            return Response({"message": "This booking has already been updated."}, status=status.HTTP_400_BAD_REQUEST)
+        if booking.return_date and booking.return_date < timezone.now().date():
+            return Response({"message": "Past trips can no longer be cancelled online."}, status=status.HTTP_400_BAD_REQUEST)
+
+        booking.booking_status = "Cancelled"
+        booking.save(update_fields=["booking_status"])
+
+        booking = Bookings.objects.select_related(
+            "customer",
+            "flight",
+            "return_flight",
+            "hotel",
+            "car",
+            "flight__departure_airport",
+            "flight__arrival_airport",
+            "return_flight__departure_airport",
+            "return_flight__arrival_airport",
+            "hotel__country",
+            "car__country",
+        ).get(pk=booking.pk)
+        return Response(BookingSerializer(booking).data)
 
     return Response(BookingSerializer(booking).data)
 
@@ -992,6 +1030,127 @@ def admin_roles(request):
 
     roles = AdminRoles.objects.all().order_by("name")
     return Response([serialize_role(role) for role in roles])
+
+
+@api_view(["GET", "POST"])
+def admin_users(request):
+    ensure_default_admin_setup()
+    permission = "admin_users.read" if request.method == "GET" else "admin_users.write"
+    admin_user, error_response = require_admin(request, permission=permission)
+    if error_response:
+        return error_response
+
+    if request.method == "GET":
+        queryset = AdminUsers.objects.select_related("role").order_by("-created_at", "-admin_user_id")
+        return Response([serialize_admin_management_user(item) for item in queryset])
+
+    email = (request.data.get("email") or "").strip().lower()
+    full_name = (request.data.get("full_name") or "").strip()
+    password = request.data.get("password") or ""
+    role_id = parse_int_value(request.data.get("role_id"))
+    is_active = parse_bool_value(request.data.get("is_active"))
+
+    errors = {}
+    if not email:
+        errors["email"] = "Email is required."
+    elif AdminUsers.objects.filter(email=email).exists():
+        errors["email"] = "An admin user with this email already exists."
+
+    if not full_name:
+        errors["full_name"] = "Full name is required."
+
+    if len(password) < 8:
+        errors["password"] = "Password must be at least 8 characters."
+
+    role = AdminRoles.objects.filter(pk=role_id).first() if role_id else None
+    if role is None:
+        errors["role_id"] = "A valid role is required."
+
+    if errors:
+        return Response({"message": "Please correct the highlighted fields.", "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    managed_admin = AdminUsers.objects.create(
+        role=role,
+        email=email,
+        full_name=full_name,
+        password_hash=make_password(password),
+        is_active=True if is_active is None else is_active,
+    )
+    log_admin_event(
+        action="admin_user_create",
+        resource_type="admin_user",
+        resource_id=str(managed_admin.admin_user_id),
+        admin_user=admin_user,
+        details={"after": serialize_admin_management_user(managed_admin)},
+        request=request,
+    )
+    return Response(serialize_admin_management_user(managed_admin), status=status.HTTP_201_CREATED)
+
+
+@api_view(["PUT", "PATCH"])
+def admin_user_detail(request, admin_user_id):
+    ensure_default_admin_setup()
+    admin_user, error_response = require_admin(request, permission="admin_users.write")
+    if error_response:
+        return error_response
+
+    managed_admin = AdminUsers.objects.select_related("role").filter(pk=admin_user_id).first()
+    if managed_admin is None:
+        return Response({"message": "Admin user not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    before = serialize_admin_management_user(managed_admin)
+    email = (request.data.get("email") or managed_admin.email or "").strip().lower()
+    full_name = (request.data.get("full_name") or managed_admin.full_name or "").strip()
+    password = request.data.get("password")
+    role_id = parse_int_value(request.data.get("role_id"))
+    is_active = parse_bool_value(request.data.get("is_active"))
+
+    errors = {}
+    if not email:
+        errors["email"] = "Email is required."
+    elif AdminUsers.objects.exclude(pk=managed_admin.pk).filter(email=email).exists():
+        errors["email"] = "An admin user with this email already exists."
+
+    if not full_name:
+        errors["full_name"] = "Full name is required."
+
+    if password is not None and password != "" and len(password) < 8:
+        errors["password"] = "Password must be at least 8 characters."
+
+    role = managed_admin.role
+    if role_id is not None:
+        role = AdminRoles.objects.filter(pk=role_id).first()
+        if role is None:
+            errors["role_id"] = "A valid role is required."
+
+    if admin_user.admin_user_id == managed_admin.admin_user_id and is_active is False:
+        errors["is_active"] = "You cannot deactivate your own admin account."
+
+    if errors:
+        return Response({"message": "Please correct the highlighted fields.", "errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    managed_admin.email = email
+    managed_admin.full_name = full_name
+    managed_admin.role = role
+    if is_active is not None:
+        managed_admin.is_active = is_active
+    if password:
+        managed_admin.password_hash = make_password(password)
+        managed_admin.failed_login_attempts = 0
+        managed_admin.locked_until = None
+    update_fields = ["email", "full_name", "role", "is_active", "updated_at"]
+    if password:
+        update_fields.extend(["password_hash", "failed_login_attempts", "locked_until"])
+    managed_admin.save(update_fields=update_fields)
+    log_admin_event(
+        action="admin_user_update",
+        resource_type="admin_user",
+        resource_id=str(managed_admin.admin_user_id),
+        admin_user=admin_user,
+        details={"before": before, "after": serialize_admin_management_user(managed_admin)},
+        request=request,
+    )
+    return Response(serialize_admin_management_user(managed_admin))
 
 
 @api_view(["GET", "POST"])
@@ -1256,11 +1415,13 @@ def build_customer_summary(customer):
     booking_count = bookings.count()
     upcoming_trips = bookings.filter(return_date__gte=timezone.now().date()).count()
     total_spent = bookings.aggregate(total=Sum("total_price")).get("total") or Decimal("0")
+    loyalty_miles = int(total_spent)
 
     return {
         "booking_count": booking_count,
         "upcoming_trips": upcoming_trips,
-        "loyalty_points": int(total_spent // Decimal("10")),
+        "loyalty_points": loyalty_miles,
+        "loyalty_miles": loyalty_miles,
     }
 
 
