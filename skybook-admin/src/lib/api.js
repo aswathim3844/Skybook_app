@@ -3,11 +3,11 @@ const API_BASE_URL =
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
-    ...options,
   });
 
   let payload = null;
@@ -158,5 +158,27 @@ export function deleteCar(token, carId) {
 export function fetchAdminRoles(token) {
   return request("/admin/roles/", {
     headers: bearer(token),
+  });
+}
+
+export function fetchAdminUsers(token) {
+  return request("/admin/users/", {
+    headers: bearer(token),
+  });
+}
+
+export function createAdminUser(token, payload) {
+  return request("/admin/users/", {
+    method: "POST",
+    headers: bearer(token),
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateAdminUser(token, adminUserId, payload) {
+  return request(`/admin/users/${adminUserId}/`, {
+    method: "PATCH",
+    headers: bearer(token),
+    body: JSON.stringify(payload),
   });
 }

@@ -6,6 +6,7 @@ const protectedPaths = [
   "/flights",
   "/hotels",
   "/cars",
+  "/admin-users",
 ];
 
 export function middleware(request) {
@@ -21,5 +22,5 @@ export function middleware(request) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/bookings/:path*", "/flights/:path*", "/hotels/:path*", "/cars/:path*"],
+  matcher: ["/dashboard/:path*", "/bookings/:path*", "/flights/:path*", "/hotels/:path*", "/cars/:path*", "/admin-users/:path*"],
 };

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import SiteFooter from "@/components/travel/SiteFooter";
 import Navbar from "@/components/ui/Navbar";
 import { PageHero } from "@/components/travel/TravelUI";
-import { fetchBookings } from "@/lib/api";
+import { cancelBooking, fetchBookings } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
 import { formatCurrency } from "@/lib/mock-data";
 
@@ -16,6 +16,7 @@ export default function MyBookingsClient({ confirmed = false }) {
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [cancellingReference, setCancellingReference] = useState("");
 
   useEffect(() => {
     if (!customer?.customer_id) {
@@ -57,7 +58,7 @@ export default function MyBookingsClient({ confirmed = false }) {
       <PageHero
         eyebrow="My Bookings"
         title="Manage current and upcoming trips"
-        description="This page now reads bookings from your PostgreSQL-backed Django API."
+        description="View your confirmed trips, check upcoming travel plans, and keep everything in one place."
       >
         <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
           <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Trips on account</p>
@@ -68,7 +69,7 @@ export default function MyBookingsClient({ confirmed = false }) {
       <section className="mx-auto max-w-7xl px-6 py-16 sm:px-8 lg:px-12">
         {confirmed ? (
           <div className="mb-6 rounded-[28px] border border-emerald-200 bg-emerald-50 p-5 text-emerald-800">
-            Payment received. A real booking row was created in PostgreSQL.
+            Booking confirmed. Your trip details are ready below.
           </div>
         ) : null}
 
@@ -103,6 +104,16 @@ export default function MyBookingsClient({ confirmed = false }) {
                   <span className="text-lg font-semibold text-slate-900">
                     {formatCurrency(booking.total)}
                   </span>
+                  {canCancelBooking(booking) ? (
+                    <button
+                      type="button"
+                      onClick={() => handleCancelBooking(booking)}
+                      disabled={cancellingReference === booking.booking_reference}
+                      className="inline-flex min-h-12 items-center justify-center rounded-full border border-red-200 bg-red-50 px-5 py-3 text-sm font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {cancellingReference === booking.booking_reference ? "Cancelling..." : "Cancel trip"}
+                    </button>
+                  ) : null}
                   <Link
                     href="/search-flights"
                     className="inline-flex min-h-12 items-center justify-center rounded-full bg-orange-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-orange-600"
@@ -133,6 +144,32 @@ export default function MyBookingsClient({ confirmed = false }) {
       <SiteFooter />
     </main>
   );
+
+  async function handleCancelBooking(booking) {
+    if (!customer?.customer_id || !booking?.booking_reference) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Cancel trip ${booking.booking_reference} to ${booking.destination}?`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setCancellingReference(booking.booking_reference);
+      setError("");
+      const updatedBooking = await cancelBooking(booking.booking_reference, customer.customer_id);
+      setBookings((current) =>
+        current.map((item) => (item.id === updatedBooking.id ? updatedBooking : item)),
+      );
+    } catch (err) {
+      setError(err?.message || "Could not cancel this booking right now.");
+    } finally {
+      setCancellingReference("");
+    }
+  }
 }
 
 function BookingFact({ label, value }) {
@@ -174,4 +211,20 @@ function getBookedCarLabel(booking) {
   }
 
   return "Not attached";
+}
+
+function canCancelBooking(booking) {
+  const status = String(booking?.status || "").toLowerCase();
+  if (status === "cancelled" || status === "refunded") {
+    return false;
+  }
+
+  const returnDate = booking?.return_date ? new Date(booking.return_date) : null;
+  if (!returnDate || Number.isNaN(returnDate.getTime())) {
+    return true;
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return returnDate >= today;
 }

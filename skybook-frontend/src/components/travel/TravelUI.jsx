@@ -243,6 +243,10 @@ export function ProductCard({
   isSaved = false,
   onToggleSave,
 }) {
+  const showPendingPrice =
+    item.pricingPending ||
+    ((!item.pricePerDay || Number(item.pricePerDay) <= 0) && item.sourceLabel !== "Reference price");
+
   return (
     <article className="overflow-hidden rounded-[30px] border border-slate-200 bg-white shadow-sm">
       <GradientThumbnail image={item.image} title={item.name} caption={item.details} />
@@ -275,9 +279,9 @@ export function ProductCard({
           <div>
             <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{pricePrefix}</p>
             <p className="text-xl font-semibold text-slate-900">
-              {item.pricingPending ? item.priceLabel || "Check live offers" : formatCurrency(item.pricePerDay || 0)}
+              {showPendingPrice ? item.priceLabel || "Check live offers" : formatCurrency(item.pricePerDay || 0)}
             </p>
-            {item.pricingPending ? (
+            {showPendingPrice ? (
               <p className="mt-1 text-xs text-slate-500">Final price is confirmed after hotel selection.</p>
             ) : null}
           </div>
@@ -322,12 +326,17 @@ export function SummaryPanel({
   returnFlight,
   hotel,
   car,
+  search,
   duration = 1,
   total,
   ctaHref,
   ctaLabel,
   title = "Booking Summary",
   description = "Review everything before continuing.",
+  onRemoveFlight,
+  onRemoveReturnFlight,
+  onRemoveHotel,
+  onRemoveCar,
 }) {
   const stayDays = Math.max(duration || 1, 1);
   const flightTotal = flight ? flight.price || 0 : 0;
@@ -336,6 +345,18 @@ export function SummaryPanel({
   const hotelTotal = hotelUnitPrice * stayDays;
   const carUnitPrice = car ? car.pricePerDay || 0 : 0;
   const carTotal = carUnitPrice * stayDays;
+  const hotelDateDetail =
+    hotel && search?.departure && search?.returnDate
+      ? `Stay dates: ${formatDateRange(search.departure, search.returnDate)}`
+      : hotel
+        ? null
+        : "No hotel cost yet";
+  const carDateDetail =
+    car && search?.departure && search?.returnDate
+      ? `Rental dates: ${formatDateRange(search.departure, search.returnDate)}`
+      : car
+        ? null
+        : "No car cost yet";
 
   return (
     <aside className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
@@ -352,6 +373,8 @@ export function SummaryPanel({
           name={flight ? `${flight.airline} ${flight.code}` : "Not selected yet"}
           price={flightTotal}
           detail="One-time flight price"
+          actionLabel={flight ? "Remove" : null}
+          onAction={flight ? onRemoveFlight : null}
         />
         {returnFlight ? (
           <SummaryItem
@@ -360,6 +383,8 @@ export function SummaryPanel({
             name={`${returnFlight.airline} ${returnFlight.code}`}
             price={returnFlightTotal}
             detail="One-time return flight price"
+            actionLabel="Remove"
+            onAction={onRemoveReturnFlight}
           />
         ) : null}
         <SummaryItem
@@ -370,8 +395,11 @@ export function SummaryPanel({
           detail={
             hotel
               ? `${formatCurrency(hotelUnitPrice)} per night x ${stayDays} ${stayDays === 1 ? "night" : "nights"}`
-              : "No hotel cost yet"
+              : hotelDateDetail
           }
+          subdetail={hotel ? hotelDateDetail : null}
+          actionLabel={hotel ? "Remove" : null}
+          onAction={hotel ? onRemoveHotel : null}
         />
         <SummaryItem
           icon={CarFront}
@@ -381,8 +409,11 @@ export function SummaryPanel({
           detail={
             car
               ? `${formatCurrency(carUnitPrice)} per day x ${stayDays} ${stayDays === 1 ? "day" : "days"}`
-              : "No car cost yet"
+              : carDateDetail
           }
+          subdetail={car ? carDateDetail : null}
+          actionLabel={car ? "Remove" : null}
+          onAction={car ? onRemoveCar : null}
         />
       </div>
 
@@ -423,7 +454,7 @@ export function SummaryPanel({
   );
 }
 
-function SummaryItem({ icon: Icon, title, name, price, detail }) {
+function SummaryItem({ icon: Icon, title, name, price, detail, subdetail, actionLabel, onAction }) {
   return (
     <div className="flex items-center justify-between rounded-[24px] border border-slate-200 p-4">
       <div className="flex items-start gap-3">
@@ -434,11 +465,42 @@ function SummaryItem({ icon: Icon, title, name, price, detail }) {
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{title}</p>
           <p className="mt-1 font-semibold text-slate-900">{name}</p>
           {detail ? <p className="mt-1 text-xs text-slate-500">{detail}</p> : null}
+          {subdetail ? <p className="mt-1 text-xs font-medium text-slate-400">{subdetail}</p> : null}
         </div>
       </div>
-      <p className="text-sm font-semibold text-slate-900">{formatCurrency(price || 0)}</p>
+      <div className="flex flex-col items-end gap-3">
+        <p className="text-sm font-semibold text-slate-900">{formatCurrency(price || 0)}</p>
+        {actionLabel && onAction ? (
+          <button
+            type="button"
+            onClick={onAction}
+            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+          >
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
+}
+
+function formatDateRange(startDate, endDate) {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return [startDate, endDate].filter(Boolean).join(" - ");
+  }
+
+  return `${start.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  })} - ${end.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  })}`;
 }
 
 export function AIRecommendationCard({ item, selected = false }) {

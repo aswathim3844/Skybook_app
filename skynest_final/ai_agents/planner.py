@@ -1,55 +1,25 @@
-"""
-agents/planner.py
-SkyNest multi-agent trip planner built with the OpenAI Agents SDK.
-
-Architecture:
-  ┌─────────────────────────────────────────────────────┐
-  │           User Query (origin→dest, dates, budget)    │
-  └────────────────────────┬────────────────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │  ITINERARY  │  LLM#1 — generate day-by-day plan
-                    │     LLM     │  based on destination + trip type
-                    └──────┬──────┘
-                           │  passes itinerary + budget → orchestrator
-              ┌────────────▼──────────────────────┐
-              │      PLANNER AGENT (Orchestrator)  │
-              │   coordinates all sub-agents       │
-              └──┬──────────┬──────────┬───────────┘
-                 │          │          │
-         ┌───────▼──┐ ┌─────▼──┐ ┌────▼────┐
-         │  FLIGHT  │ │ HOTEL  │ │  CAR    │  search SQLite in parallel
-         │  AGENT   │ │ AGENT  │ │  AGENT  │
-         └──────────┘ └────────┘ └─────────┘
-                 │
-         ┌───────▼─────────┐
-         │  KB AGENT (RAG) │  visa + policies from ChromaDB
-         └─────────────────┘
-                 │
-         ┌───────▼──────────┐
-         │ EVALUATOR AGENT  │  scores the plan 1-10
-         └──────────────────┘
-"""
 
 import asyncio
 import json
-from typing import Optional
 from pydantic import BaseModel
 from agents import Agent, Runner, handoff, input_guardrail, GuardrailFunctionOutput, trace
 from dotenv import load_dotenv
 
-from ai_agents.tools import search_flights, search_hotels, search_cars, ask_skynest_kb, create_booking
+from ai_agents.tools import (
+    search_flights, search_hotels, search_cars, ask_skynest_kb, create_booking,
+    _search_flights_db, _search_hotels_db, _search_cars_db, _ask_kb,
+)
 
 load_dotenv(override=True)
-
 MODEL = "gpt-4o-mini"
+
 
 # ═══════════════════════════════════════════════════════════════
 # GUARDRAIL
 # ═══════════════════════════════════════════════════════════════
 
 class SafetyOutput(BaseModel):
-    is_off_topic:      bool
+    is_off_topic:       bool
     has_harmful_intent: bool
 
 _guardrail_agent = Agent(
@@ -73,40 +43,18 @@ async def travel_guardrail(ctx, agent, message):
 
 
 # ═══════════════════════════════════════════════════════════════
-# SPECIALIST AGENTS
+# SPECIALIST AGENTS  (used for qualitative tasks only)
 # ═══════════════════════════════════════════════════════════════
 
-flight_agent = Agent(
-    name="Flight Specialist",
-    instructions="""You are SkyNest's flight specialist.
-Search for available flights and return the top 3 options ranked by value.
-Always include: flight_no, departure, arrival, duration, price, aircraft, amenities.
-Respond in JSON.""",
-    tools=[search_flights],
+evaluator_agent = Agent(
+    name="Quality Evaluator",
+    instructions="""You are SkyNest's quality control agent.
+Given a complete trip plan summary, evaluate it on a scale of 1-10.
+Check: flight details present, hotel present, car present,
+12% bundle discount applied, visa info included.
+Respond ONLY with JSON: {"score": X, "issues": ["..."], "summary": "..."}
+No extra text outside the JSON.""",
     model=MODEL,
-    handoff_description="Searches SkyNest flights between two cities",
-)
-
-hotel_agent = Agent(
-    name="Hotel Specialist",
-    instructions="""You are SkyNest's hotel specialist.
-Find the best hotels matching the traveller's budget and trip type.
-Return top 3 options with name, stars, price_night, rating, description, amenities.
-Respond in JSON.""",
-    tools=[search_hotels],
-    model=MODEL,
-    handoff_description="Searches SkyNest partner hotels in the destination city",
-)
-
-car_agent = Agent(
-    name="Car Rental Specialist",
-    instructions="""You are SkyNest's car rental specialist.
-Find rental cars that suit the trip type and group size.
-Return top 3 options with model, category, price_day, seats, features.
-Respond in JSON.""",
-    tools=[search_cars],
-    model=MODEL,
-    handoff_description="Searches SkyNest rental cars in the destination city",
 )
 
 kb_agent = Agent(
@@ -114,91 +62,14 @@ kb_agent = Agent(
     instructions="""You are SkyNest's travel knowledge specialist.
 Answer questions about visa requirements, baggage policy, cancellation rules,
 loyalty programme, and destination guides using the knowledge base tool.
-Be accurate and never hallucinate.""",
+Be accurate and concise. Never hallucinate.""",
     tools=[ask_skynest_kb],
     model=MODEL,
-    handoff_description="Answers visa, policy, and destination questions via RAG",
-)
-
-evaluator_agent = Agent(
-    name="Quality Evaluator",
-    instructions="""You are SkyNest's quality control agent.
-Given a complete trip plan, evaluate it on a scale of 1-10.
-Check: flight details complete, hotel complete, car complete,
-12% bundle discount correctly applied, visa info included.
-If score < 7, list specific issues.
-Respond in JSON: {"score": X, "issues": [...], "summary": "..."}""",
-    model=MODEL,
-    handoff_description="Scores the complete trip plan for quality",
 )
 
 
 # ═══════════════════════════════════════════════════════════════
-# ORCHESTRATOR PLANNER AGENT
-# ═══════════════════════════════════════════════════════════════
-
-planner_agent = Agent(
-    name="SkyNest Trip Planner",
-    instructions="""You are SkyNest's master AI trip planner.
-
-When given trip details, follow these steps IN ORDER:
-
-STEP 1 — Extract trip parameters:
-  origin, destination, departure_date, return_date, nights, passengers, seat_class, budget, trip_type
-
-STEP 2 — Search in parallel using ALL THREE tools simultaneously:
-  • search_flights(origin, destination, seat_class)
-  • search_hotels(destination, max_price=budget*0.4/nights)
-  • search_cars(destination, max_price=budget*0.15/nights)
-
-STEP 3 — Fetch visa + policy info:
-  • ask_skynest_kb("visa requirements for {origin} to {destination}")
-  • ask_skynest_kb("SkyNest baggage policy and check-in times")
-
-STEP 4 — Calculate bundle pricing:
-  flight_cost  = cheapest_flight_price × passengers
-  hotel_cost   = cheapest_hotel_price × nights
-  car_cost     = cheapest_car_price × nights
-  subtotal     = flight_cost + hotel_cost + car_cost
-  discount     = subtotal × 0.12  (12% SkyNest bundle discount)
-  taxes        = subtotal × 0.10
-  grand_total  = subtotal - discount + taxes
-  miles_earned = grand_total × 1
-
-STEP 5 — Hand off to Quality Evaluator for scoring.
-
-STEP 6 — Return a COMPLETE structured trip plan as JSON with:
-  - trip_summary (origin, destination, dates, passengers)
-  - itinerary (from the user's itinerary input)
-  - flights (top 3)
-  - hotels (top 3)
-  - cars (top 3)
-  - pricing (full breakdown)
-  - visa_info
-  - baggage_info
-  - quality_score
-  - miles_earned
-
-PRICING RULES:
-- Always apply 12% bundle discount when all 3 are booked
-- Never guess prices — use actual tool results
-- If a search returns no results, note it and continue
-""",
-    tools=[search_flights, search_hotels, search_cars, ask_skynest_kb],
-    handoffs=[
-        handoff(
-            evaluator_agent,
-            tool_name_override="evaluate_trip_plan",
-            tool_description_override="Send the complete trip plan to QA for scoring",
-        )
-    ],
-    input_guardrails=[travel_guardrail],
-    model=MODEL,
-)
-
-
-# ═══════════════════════════════════════════════════════════════
-# ITINERARY GENERATOR  (LLM #1 — before the agent pipeline)
+# ITINERARY GENERATOR  (standalone LLM — runs before agents)
 # ═══════════════════════════════════════════════════════════════
 
 async def generate_itinerary(
@@ -206,18 +77,13 @@ async def generate_itinerary(
     nights: int,
     trip_type: str,
     budget_label: str,
-) -> str:
-    """
-    Standalone LLM call to generate a day-by-day itinerary.
-    This runs BEFORE the planner agent, enriching the prompt with a
-    concrete plan that the orchestrator can reference.
-    """
-    from litellm import completion as litellm_completion
+) -> list:
+    from litellm import completion as _comp
     prompt = f"""Create a {nights}-night itinerary for {destination}.
 Trip type: {trip_type}
 Budget level: {budget_label}
 
-Format as a JSON array of day objects:
+Return a JSON array of day objects ONLY — no extra text:
 [
   {{
     "day": 1,
@@ -227,19 +93,18 @@ Format as a JSON array of day objects:
     "evening": "...",
     "highlights": ["attraction1", "attraction2"],
     "estimated_local_spend": "$XX"
-  }},
-  ...
+  }}
 ]
 
-Include local food, cultural tips, and SkyNest recommended experiences.
-Keep it realistic and exciting. Return valid JSON only."""
+Include local food, cultural tips, and SkyNest-recommended experiences.
+Return valid JSON array only — no markdown fences."""
 
-    resp = litellm_completion(
-        model="openai/gpt-4.1-nano",
-        messages=[{"role": "user", "content": prompt}],
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(
+        None,
+        lambda: _comp(model="openai/gpt-4.1-nano", messages=[{"role": "user", "content": prompt}]),
     )
     raw = resp.choices[0].message.content.strip()
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -251,7 +116,70 @@ Keep it realistic and exciting. Return valid JSON only."""
 
 
 # ═══════════════════════════════════════════════════════════════
-# MAIN ENTRY POINT
+# PRICING CALCULATOR  (pure Python — never trust the LLM with maths)
+# ═══════════════════════════════════════════════════════════════
+
+def calculate_pricing(
+    flights: list,
+    hotels: list,
+    cars: list,
+    passengers: int,
+    nights: int,
+    seat_class: str,
+) -> dict:
+    price_key = "price_economy" if seat_class.lower() != "business" else "price_business"
+
+    flight_price = flights[0][price_key] if flights else 0
+    hotel_price  = hotels[0]["price_night"] if hotels else 0
+    car_price    = cars[0]["price_day"]    if cars    else 0
+
+    flight_cost  = round(flight_price * passengers, 2)
+    hotel_cost   = round(hotel_price  * nights,     2)
+    car_cost     = round(car_price    * nights,      2)
+    subtotal     = round(flight_cost + hotel_cost + car_cost, 2)
+
+    all_three    = bool(flights and hotels and cars)
+    discount     = round(subtotal * 0.12, 2) if all_three else 0
+    taxes        = round(subtotal * 0.10, 2)
+    grand_total  = round(subtotal - discount + taxes, 2)
+
+    return {
+        "flight_cost":     flight_cost,
+        "hotel_cost":      hotel_cost,
+        "car_cost":        car_cost,
+        "subtotal":        subtotal,
+        "bundle_discount": discount,
+        "taxes":           taxes,
+        "grand_total":     grand_total,
+        "miles_earned":    int(grand_total),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# QUALITY EVALUATOR  (agent call with timeout guard)
+# ═══════════════════════════════════════════════════════════════
+
+async def evaluate_plan(summary: str) -> dict:
+    try:
+        result = await asyncio.wait_for(
+            Runner.run(evaluator_agent, summary),
+            timeout=30,
+        )
+        raw = result.final_output
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return json.loads(raw.strip())
+        return raw if isinstance(raw, dict) else {"score": 8, "issues": [], "summary": "Plan looks good."}
+    except Exception as e:
+        return {"score": 7, "issues": [f"Evaluator unavailable: {e}"], "summary": "Auto-scored."}
+
+
+# ═══════════════════════════════════════════════════════════════
+# REQUEST MODEL
 # ═══════════════════════════════════════════════════════════════
 
 class PlanRequest(BaseModel):
@@ -262,20 +190,25 @@ class PlanRequest(BaseModel):
     departure_date: str
     return_date:    str
     nights:         int
-    passengers:     int = 1
-    seat_class:     str = "Economy"
+    passengers:     int   = 1
+    seat_class:     str   = "Economy"
     budget:         float = 3000
-    trip_type:      str = "Cultural Exploration"
+    trip_type:      str   = "Cultural Exploration"
 
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ═══════════════════════════════════════════════════════════════
 
 async def plan_trip(req: PlanRequest) -> dict:
     """
-    Full multi-agent trip planning pipeline.
-    1. Itinerary LLM generates day-by-day plan
-    2. Orchestrator agent searches flights/hotels/cars + pricing
-    3. Returns complete structured result
+    Full trip planning pipeline.
+
+    Step 1 — Parallel async: itinerary LLM + DB searches + visa KB
+    Step 2 — Pricing calculated in Python
+    Step 3 — Quality evaluation via agent
+    Step 4 — Return complete structured dict (no JSON parsing risk)
     """
-    # Determine budget label for itinerary prompt
     if req.budget < 1500:
         budget_label = "budget / backpacker"
     elif req.budget < 4000:
@@ -285,87 +218,89 @@ async def plan_trip(req: PlanRequest) -> dict:
     else:
         budget_label = "luxury / first class"
 
-    # Step 1 — Generate itinerary (concurrently with agent pipeline start)
-    itinerary = await generate_itinerary(
-        destination=req.destination,
-        nights=req.nights,
-        trip_type=req.trip_type,
-        budget_label=budget_label,
+    # ── Budget-derived price caps ─────────────────────────────
+    hotel_cap = round(req.budget * 0.4 / max(req.nights, 1), 2)
+    car_cap   = round(req.budget * 0.15 / max(req.nights, 1), 2)
+
+    # ── Step 1: Run everything in parallel ───────────────────
+    loop = asyncio.get_event_loop()
+
+    (
+        itinerary,
+        flights_data,
+        hotels_data,
+        cars_data,
+        visa_info,
+        baggage_info,
+    ) = await asyncio.gather(
+        # LLM itinerary
+        generate_itinerary(req.destination, req.nights, req.trip_type, budget_label),
+        # Direct DB calls (no agent, no JSON parsing risk)
+        loop.run_in_executor(None, lambda: _search_flights_db(req.origin, req.destination, req.seat_class)),
+        loop.run_in_executor(None, lambda: _search_hotels_db(req.destination, hotel_cap)),
+        loop.run_in_executor(None, lambda: _search_cars_db(req.destination, car_cap)),
+        # RAG knowledge base
+        loop.run_in_executor(None, lambda: _ask_kb(f"visa requirements for travel from {req.origin} to {req.destination}")),
+        loop.run_in_executor(None, lambda: _ask_kb("SkyNest baggage policy check-in times and rules")),
     )
 
-    # Step 2 — Build rich message for the orchestrator
-    agent_message = f"""
-Plan a complete SkyNest trip for {req.name} ({req.email}):
+    flights = flights_data.get("flights", [])
+    hotels  = hotels_data.get("hotels",  [])
+    cars    = cars_data.get("cars",      [])
 
-Origin:          {req.origin}
-Destination:     {req.destination}
-Departure:       {req.departure_date}
-Return:          {req.return_date}
-Nights:          {req.nights}
-Passengers:      {req.passengers}
-Seat Class:      {req.seat_class}
-Total Budget:    ${req.budget}
-Trip Type:       {req.trip_type}
-Budget Level:    {budget_label}
+    # ── Step 2: Pricing (pure Python) ────────────────────────
+    pricing = calculate_pricing(flights, hotels, cars, req.passengers, req.nights, req.seat_class)
 
-A {req.nights}-night itinerary has been generated. Use it as context for recommendations.
-Please search flights, hotels, and cars, then build the complete pricing breakdown with
-the 12% SkyNest bundle discount applied.
-"""
+    # ── Step 3: Quality evaluation ───────────────────────────
+    eval_summary = (
+        f"Trip: {req.origin} → {req.destination}, {req.nights} nights, {req.passengers} pax.\n"
+        f"Flights found: {len(flights)}. Hotels found: {len(hotels)}. Cars found: {len(cars)}.\n"
+        f"Pricing: subtotal=${pricing['subtotal']}, "
+        f"discount=${pricing['bundle_discount']} (12%), "
+        f"grand_total=${pricing['grand_total']}.\n"
+        f"Visa info present: {'yes' if visa_info and len(visa_info) > 20 else 'no'}.\n"
+        f"Baggage info present: {'yes' if baggage_info and len(baggage_info) > 20 else 'no'}."
+    )
+    evaluation = await evaluate_plan(eval_summary)
 
-    # Step 3 — Run the agent pipeline
-    with trace("SkyNest AI Planner"):
-        result = await Runner.run(planner_agent, agent_message)
-
-    # Step 4 — Parse the agent's output
-    raw_output = result.final_output
-    try:
-        if isinstance(raw_output, str):
-            # Strip markdown fences
-            clean = raw_output.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            plan_data = json.loads(clean.strip())
-        else:
-            plan_data = raw_output
-    except Exception:
-        plan_data = {"raw": raw_output}
-
-    # Step 5 — Merge itinerary into result
-    plan_data["itinerary"] = itinerary
-    plan_data["trip_meta"] = {
-        "name":           req.name,
-        "email":          req.email,
-        "origin":         req.origin,
-        "destination":    req.destination,
-        "departure_date": req.departure_date,
-        "return_date":    req.return_date,
-        "nights":         req.nights,
-        "passengers":     req.passengers,
-        "seat_class":     req.seat_class,
-        "budget":         req.budget,
-        "trip_type":      req.trip_type,
+    # ── Step 4: Return structured result ─────────────────────
+    return {
+        "trip_meta": {
+            "name":           req.name,
+            "email":          req.email,
+            "origin":         req.origin,
+            "destination":    req.destination,
+            "departure_date": req.departure_date,
+            "return_date":    req.return_date,
+            "nights":         req.nights,
+            "passengers":     req.passengers,
+            "seat_class":     req.seat_class,
+            "budget":         req.budget,
+            "trip_type":      req.trip_type,
+        },
+        "itinerary":   itinerary,
+        "flights":     flights,          # plain list — no nesting
+        "hotels":      hotels,           # plain list — no nesting
+        "cars":        cars,             # plain list — no nesting
+        "pricing":     pricing,
+        "visa_info":   visa_info,
+        "baggage_info":baggage_info,
+        "evaluation":  evaluation,
     }
 
-    return plan_data
 
-
-# Quick CLI test
+# ── Quick CLI test ────────────────────────────────────────────────
 if __name__ == "__main__":
     req = PlanRequest(
-        name="Jeffy",
-        email="jeffy@example.com",
-        origin="Mumbai",
-        destination="Dubai",
-        departure_date="2026-04-15",
-        return_date="2026-04-22",
-        nights=7,
-        passengers=2,
-        seat_class="Economy",
-        budget=3000,
-        trip_type="Beach & Relaxation",
+        name="Jeffy", email="jeffy@skynest.aero",
+        origin="Mumbai", destination="Dubai",
+        departure_date="2026-04-15", return_date="2026-04-22",
+        nights=7, passengers=2, seat_class="Economy",
+        budget=3000, trip_type="Beach & Relaxation",
     )
     result = asyncio.run(plan_trip(req))
-    print(json.dumps(result, indent=2))
+    print(f"Flights : {len(result['flights'])}")
+    print(f"Hotels  : {len(result['hotels'])}")
+    print(f"Cars    : {len(result['cars'])}")
+    print(f"Pricing : {result['pricing']}")
+    print(f"Score   : {result['evaluation'].get('score')}")

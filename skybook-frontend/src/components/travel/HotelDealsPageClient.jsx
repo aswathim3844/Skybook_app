@@ -10,14 +10,19 @@ import { buildBookingQuery, defaultBookingSearch, useBookingStore } from "@/lib/
 import { fetchAllHotels } from "@/lib/api";
 import { formatCurrency, getTripDuration } from "@/lib/mock-data";
 
-export default function HotelDealsPageClient({ initialHotelId = "" }) {
+export default function HotelDealsPageClient({
+  initialHotelId = "",
+  initialDeparture = "",
+  initialReturn = "",
+}) {
   const router = useRouter();
   const setSearch = useBookingStore((state) => state.setSearch);
   const selectHotel = useBookingStore((state) => state.selectHotel);
   const [hotels, setHotels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedHotelId, setSelectedHotelId] = useState(initialHotelId || "");
-  const [stayDays, setStayDays] = useState(Math.max(getTripDuration(defaultBookingSearch.departure, defaultBookingSearch.returnDate), 1));
+  const [checkInDate, setCheckInDate] = useState(initialDeparture || defaultBookingSearch.departure);
+  const [checkOutDate, setCheckOutDate] = useState(initialReturn || defaultBookingSearch.returnDate);
   const [filters, setFilters] = useState({
     city: "all",
     maxPrice: "",
@@ -94,6 +99,12 @@ export default function HotelDealsPageClient({ initialHotelId = "" }) {
     null;
 
   useEffect(() => {
+    if (checkOutDate && checkInDate && checkOutDate < checkInDate) {
+      setCheckOutDate(checkInDate);
+    }
+  }, [checkInDate, checkOutDate]);
+
+  useEffect(() => {
     if (!selectedHotel) {
       return;
     }
@@ -103,17 +114,17 @@ export default function HotelDealsPageClient({ initialHotelId = "" }) {
       tripType: "hotel-only",
       from: "",
       to: selectedHotel.location || "",
-      departure: defaultBookingSearch.departure,
-      returnDate: addDays(defaultBookingSearch.departure, stayDays),
+      departure: checkInDate,
+      returnDate: checkOutDate,
       passengers: "2 Adults",
       multiCitySegments: [],
     };
 
     setSearch(search);
     selectHotel(selectedHotel);
-  }, [selectHotel, selectedHotel, setSearch, stayDays]);
+  }, [checkInDate, checkOutDate, selectHotel, selectedHotel, setSearch]);
 
-  const duration = Math.max(stayDays, 1);
+  const duration = Math.max(getTripDuration(checkInDate, checkOutDate), 1);
   const hotelTotal = Number(selectedHotel?.pricePerDay || 0) * duration;
   const paymentHref = selectedHotel
     ? `/payment?${buildBookingQuery({
@@ -122,8 +133,8 @@ export default function HotelDealsPageClient({ initialHotelId = "" }) {
           tripType: "hotel-only",
           from: "",
           to: selectedHotel.location || "",
-          departure: defaultBookingSearch.departure,
-          returnDate: addDays(defaultBookingSearch.departure, duration),
+          departure: checkInDate,
+          returnDate: checkOutDate,
           passengers: "2 Adults",
           multiCitySegments: [],
         },
@@ -262,14 +273,23 @@ export default function HotelDealsPageClient({ initialHotelId = "" }) {
                     {formatCurrency(Number(selectedHotel?.pricePerDay || 0))}
                   </span>
                 </div>
-                <label className="flex items-center justify-between gap-3">
-                  <span>Days</span>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-600">Check-in</span>
                   <input
-                    type="number"
-                    min="1"
-                    value={stayDays}
-                    onChange={(event) => setStayDays(Math.max(1, Number(event.target.value) || 1))}
-                    className="min-h-10 w-24 rounded-[14px] border border-slate-200 bg-slate-50 px-3 text-right text-slate-900 outline-none"
+                    type="date"
+                    value={checkInDate}
+                    onChange={(event) => setCheckInDate(event.target.value)}
+                    className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-600">Check-out</span>
+                  <input
+                    type="date"
+                    min={checkInDate}
+                    value={checkOutDate}
+                    onChange={(event) => setCheckOutDate(event.target.value)}
+                    className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
                   />
                 </label>
                 <div className="flex items-center justify-between">
@@ -293,10 +313,4 @@ export default function HotelDealsPageClient({ initialHotelId = "" }) {
       <SiteFooter />
     </main>
   );
-}
-
-function addDays(dateString, days) {
-  const date = new Date(dateString);
-  date.setDate(date.getDate() + Math.max(days, 1));
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }

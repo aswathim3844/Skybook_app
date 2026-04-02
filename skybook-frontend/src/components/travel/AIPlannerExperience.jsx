@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Bot,
   CarFront,
@@ -15,23 +16,21 @@ import {
   WandSparkles,
 } from "lucide-react";
 import {
-  createBooking,
   createPlannerSession,
   fetchAllCars,
   fetchFlightLocations,
   fetchFlightRoutes,
   fetchHotelOffer,
-  fetchPlannerSessions,
   fetchPlannerSession,
   fetchProviderStatus,
   enrichPlannerDraft,
   generatePlannerSessionPlan,
   revalidatePlannerDraft,
-  retrieveBooking,
   sendPlannerSessionMessage,
   updatePlannerDraft,
 } from "@/lib/api";
 import { useAuthStore } from "@/lib/auth-store";
+import { buildBookingQuery, useBookingStore } from "@/lib/booking-store";
 import { formatCurrency } from "@/lib/mock-data";
 
 const TRIP_TYPES = [
@@ -52,6 +51,8 @@ const QUICK_CHIPS = [
   "SkyBook baggage allowance?",
   "How do I cancel my booking?",
 ];
+const DEFAULT_CHAT_MESSAGE =
+  "Tell me where you want to go, what matters most, or ask about visa, weather, baggage, and cancellations. I will help shape the trip before you search.";
 
 const HOTEL_STYLES = ["Any", "Budget", "Standard", "Luxury", "Family Friendly", "Business"];
 const HOTEL_AMENITIES = ["Breakfast", "Pool", "WiFi", "Airport Transfer"];
@@ -62,12 +63,17 @@ const inputClassName =
   "min-h-12 w-full rounded-[20px] border border-slate-200 bg-white px-4 text-slate-900 outline-none transition focus:border-[#173a7a] focus:ring-4 focus:ring-[#173a7a]/10";
 
 export default function AIPlannerExperience() {
+  const router = useRouter();
   const customer = useAuthStore((state) => state.customer);
+  const setBookingSearch = useBookingStore((state) => state.setSearch);
+  const selectBookingFlight = useBookingStore((state) => state.selectFlight);
+  const selectBookingReturnFlight = useBookingStore((state) => state.selectReturnFlight);
+  const selectBookingHotel = useBookingStore((state) => state.selectHotel);
+  const selectBookingCar = useBookingStore((state) => state.selectCar);
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      content:
-        "Tell me where you want to go, what matters most, or ask about visa, weather, baggage, and cancellations. I will help shape the trip before you search.",
+      content: DEFAULT_CHAT_MESSAGE,
     },
   ]);
   const [chatInput, setChatInput] = useState("");
@@ -78,17 +84,12 @@ export default function AIPlannerExperience() {
   const [searchError, setSearchError] = useState("");
   const [activeTab, setActiveTab] = useState("flights");
   const [confirmation, setConfirmation] = useState(null);
-  const [lookupReference, setLookupReference] = useState("");
-  const [lookupResult, setLookupResult] = useState(null);
-  const [lookupError, setLookupError] = useState("");
-  const [lookupLoading, setLookupLoading] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [plannerSessionId, setPlannerSessionId] = useState(null);
   const [currentDraftId, setCurrentDraftId] = useState(null);
   const [revalidationState, setRevalidationState] = useState(null);
   const [confirmingBooking, setConfirmingBooking] = useState(false);
   const [providerStatus, setProviderStatus] = useState(null);
-  const [sessionHistory, setSessionHistory] = useState([]);
   const [locationOptions, setLocationOptions] = useState([]);
   const [routeOptions, setRouteOptions] = useState([]);
   const [carTypeOptions, setCarTypeOptions] = useState(["Any"]);
@@ -130,19 +131,22 @@ export default function AIPlannerExperience() {
   });
   const plannerLocationOptions = useMemo(
     () =>
-      locationOptions.map((location) => {
-        const parts = [
-          location.city,
-          location.country,
-          location.city_code ? `(${location.city_code})` : "",
-        ].filter(Boolean);
-        const label = location.label || parts.join(", ").replace(", (", " (");
+      dedupeBy(
+        locationOptions.map((location) => {
+          const parts = [
+            location.city,
+            location.country,
+            location.city_code ? `(${location.city_code})` : "",
+          ].filter(Boolean);
+          const label = location.label || parts.join(", ").replace(", (", " (");
 
-        return {
-          value: label,
-          label,
-        };
-      }),
+          return {
+            value: label,
+            label,
+          };
+        }),
+        (location) => location.value,
+      ),
     [locationOptions],
   );
   const locationTokensFor = useMemo(
@@ -186,10 +190,13 @@ export default function AIPlannerExperience() {
   }, [form.origin, locationOptions, locationTokensFor, plannerRouteMap]);
   const plannerDestinationOptions = useMemo(
     () =>
-      destinationLocationOptions.map((location) => ({
-        value: formatLocationLabel(location),
-        label: formatLocationLabel(location),
-      })),
+      dedupeBy(
+        destinationLocationOptions.map((location) => ({
+          value: formatLocationLabel(location),
+          label: formatLocationLabel(location),
+        })),
+        (location) => location.value,
+      ),
     [destinationLocationOptions],
   );
 
@@ -314,29 +321,6 @@ export default function AIPlannerExperience() {
   useEffect(() => {
     let active = true;
 
-    async function loadSessionHistory() {
-      try {
-        const sessions = await fetchPlannerSessions(customer?.customer_id || null);
-        if (active) {
-          setSessionHistory(Array.isArray(sessions) ? sessions : []);
-        }
-      } catch {
-        if (active) {
-          setSessionHistory([]);
-        }
-      }
-    }
-
-    loadSessionHistory();
-
-    return () => {
-      active = false;
-    };
-  }, [customer?.customer_id, confirmation?.id]);
-
-  useEffect(() => {
-    let active = true;
-
     async function loadLocations() {
       try {
         const [locations, routes] = await Promise.all([
@@ -351,32 +335,6 @@ export default function AIPlannerExperience() {
         const nextRoutes = Array.isArray(routes) ? routes : [];
         setLocationOptions(nextLocations);
         setRouteOptions(nextRoutes);
-
-        if (nextLocations.length > 0) {
-          const firstOrigin =
-            nextLocations.find((location) => location.city === "Mumbai") ||
-            nextLocations[0];
-          const originRouteDestinations = getPlannerDestinationOptionsForValue(
-            formatLocationLabel(firstOrigin),
-            buildPlannerRouteMap(nextRoutes, locationTokensFor),
-            nextLocations,
-            locationTokensFor,
-          );
-          const destinationPool = originRouteDestinations.length > 0 ? originRouteDestinations : nextLocations;
-          const firstDestination =
-            destinationPool.find((location) => location.city === "London") ||
-            destinationPool.find(
-              (location) =>
-                formatLocationLabel(location).toLowerCase() !== formatLocationLabel(firstOrigin).toLowerCase(),
-            ) ||
-            destinationPool[0];
-
-          setForm((current) => ({
-            ...current,
-            origin: current.origin || formatLocationLabel(firstOrigin),
-            destination: current.destination || formatLocationLabel(firstDestination),
-          }));
-        }
       } catch {
         if (active) {
           setLocationOptions([]);
@@ -501,7 +459,6 @@ export default function AIPlannerExperience() {
     });
 
     setPlannerSessionId(session.session_id);
-    setSessionHistory((current) => [session, ...current.filter((item) => item.session_id !== session.session_id)]);
 
     if (Array.isArray(session.messages) && session.messages.length > 0) {
       setMessages(
@@ -519,8 +476,7 @@ export default function AIPlannerExperience() {
     const content = (messageOverride ?? chatInput).trim();
     if (!content || chatLoading) return;
 
-    const nextMessages = [...messages, { role: "user", content }];
-    setMessages(nextMessages);
+    setMessages((current) => [...current, { role: "user", content }]);
     setChatInput("");
     setShowQuickChips(false);
     setChatLoading(true);
@@ -532,7 +488,10 @@ export default function AIPlannerExperience() {
       });
       setMessages((current) => [
         ...current,
-        { role: "assistant", content: response.reply },
+        {
+          role: response.message?.role || "assistant",
+          content: response.message?.content || response.reply,
+        },
       ]);
     } catch (error) {
       setMessages((current) => [
@@ -635,6 +594,7 @@ export default function AIPlannerExperience() {
 
     setConfirmingBooking(true);
     setSearchError("");
+    setConfirmation(null);
 
     try {
       await updatePlannerDraft(plannerSessionId, currentDraftId, {
@@ -656,56 +616,38 @@ export default function AIPlannerExperience() {
         return;
       }
 
-      const response = await createBooking({
-        name: form.name,
-        email: form.email,
-        flight: numericOrNull(selectedFlight.flight_id),
-        return_flight: numericOrNull(selectedReturnFlight?.flight_id),
-        hotel: numericOrNull(selectedHotel.hotel_id),
-        car: numericOrNull(selectedCar.car_id),
-        booking_metadata: {
-          selected_flight: selectedFlight || null,
-          selected_return_flight: selectedReturnFlight || null,
-          selected_hotel: selectedHotel || null,
-          selected_car: selectedCar || null,
-          planner_session_id: plannerSessionId,
-          planner_draft_id: currentDraftId,
-        },
-        check_in: form.departureDate,
-        check_out: form.returnDate,
-        nights,
-        passengers: form.passengers,
-        seat_class: form.seatClass,
-        total_price: pricing.grandTotal,
-      });
+      const bookingSearch = {
+        tripType: selectedReturnFlight ? "roundtrip" : "oneway",
+        from: form.origin,
+        to: form.destination,
+        departure: form.departureDate,
+        returnDate: form.returnDate,
+        passengers: formatBookingPassengers(form.passengers),
+      };
 
-      setConfirmation(response);
-      setLookupReference(response.booking_reference || "");
-      setLookupResult(response);
-      setLookupError("");
-      persistPlannerLoyalty(response, pricing.grandTotal);
+      setBookingSearch(bookingSearch);
+      selectBookingFlight(mapPlannerFlightToBookingSelection(selectedFlight));
+      if (selectedReturnFlight) {
+        selectBookingReturnFlight(mapPlannerFlightToBookingSelection(selectedReturnFlight));
+      } else {
+        selectBookingReturnFlight(null);
+      }
+      selectBookingHotel(mapPlannerHotelToBookingSelection(selectedHotel));
+      selectBookingCar(mapPlannerCarToBookingSelection(selectedCar));
+
+      router.push(
+        `/payment?${buildBookingQuery({
+          search: bookingSearch,
+          flightId: numericOrNull(selectedFlight.flight_id),
+          returnFlightId: numericOrNull(selectedReturnFlight?.flight_id),
+          hotelId: numericOrNull(selectedHotel.hotel_id),
+          carId: numericOrNull(selectedCar.car_id),
+        })}`,
+      );
     } catch (error) {
       setSearchError(errorToMessage(error) || "We could not revalidate the current package. Please run the planner again and retry booking.");
     } finally {
       setConfirmingBooking(false);
-    }
-  }
-
-  async function handleLookup() {
-    if (!lookupReference.trim()) return;
-
-    setLookupLoading(true);
-    setLookupError("");
-
-    try {
-      const result = await retrieveBooking(lookupReference.trim().toUpperCase());
-      setLookupResult(result);
-      setLookupError("");
-    } catch {
-      setLookupResult(null);
-      setLookupError("Booking not found. Use a reference like SNA000123.");
-    } finally {
-      setLookupLoading(false);
     }
   }
 
@@ -744,8 +686,7 @@ export default function AIPlannerExperience() {
           : [
               {
                 role: "assistant",
-                content:
-                  "Tell me where you want to go, what matters most, or ask about visa, weather, baggage, and cancellations. I will help shape the trip before you search.",
+                content: DEFAULT_CHAT_MESSAGE,
               },
             ],
       );
@@ -792,6 +733,17 @@ export default function AIPlannerExperience() {
     } catch {
       setSearchError("We could not load that planner session right now.");
     }
+  }
+
+  function handleClearChat() {
+    setMessages([
+      {
+        role: "assistant",
+        content: DEFAULT_CHAT_MESSAGE,
+      },
+    ]);
+    setChatInput("");
+    setShowQuickChips(true);
   }
 
   return (
@@ -1131,40 +1083,6 @@ export default function AIPlannerExperience() {
 
       <section className="grid gap-8 xl:grid-cols-[minmax(0,1.58fr)_360px]">
         <section className="order-2 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm xl:order-2 xl:sticky xl:top-6 xl:self-start">
-          {sessionHistory.length > 0 ? (
-            <div className="mb-6 rounded-[24px] border border-slate-200 bg-slate-50 p-5">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Recent Planner Sessions
-              </p>
-              <div className="mt-4 space-y-3">
-                {sessionHistory.slice(0, 3).map((session) => (
-                  <button
-                    key={session.session_id}
-                    type="button"
-                    onClick={() => handleLoadSession(session.session_id)}
-                    className={`flex w-full items-center justify-between rounded-[18px] border px-4 py-3 text-left text-sm transition ${
-                      plannerSessionId === session.session_id
-                        ? "border-orange-300 bg-white"
-                        : "border-slate-200 bg-white hover:border-slate-300"
-                    }`}
-                  >
-                    <span>
-                      <span className="block font-semibold text-slate-900">
-                        {session.title || `${session.destination || "Trip"} planner`}
-                      </span>
-                      <span className="block text-slate-500">
-                        {session.origin || "Origin"} -&gt; {session.destination || "Destination"}
-                      </span>
-                    </span>
-                    <span className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">
-                      {session.status}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
           <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
             Booking Summary
           </p>
@@ -1221,7 +1139,7 @@ export default function AIPlannerExperience() {
             disabled={!selectedFlight || !selectedHotel || !selectedCar || !currentDraftId || confirmingBooking}
             className="mt-6 inline-flex min-h-12 w-full items-center justify-center rounded-full bg-orange-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {confirmingBooking ? "Revalidating Package..." : "Confirm & Book"}
+            {confirmingBooking ? "Preparing Checkout..." : "Continue to Payment"}
           </button>
 
           {revalidationState ? (
@@ -1434,87 +1352,6 @@ export default function AIPlannerExperience() {
         </section>
       </section>
 
-      <section className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-        <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">
-          Retrieve Booking
-        </p>
-        <h2 className="mt-3 text-2xl font-semibold text-slate-900">
-          Already have a booking? Find it here
-        </h2>
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-          <input
-            value={lookupReference}
-            onChange={(event) => setLookupReference(event.target.value)}
-            placeholder="SNA000123"
-            className="min-h-12 flex-1 rounded-full border border-slate-200 bg-slate-50 px-5 text-sm text-slate-900 outline-none transition focus:border-[#173a7a] focus:ring-4 focus:ring-[#173a7a]/10"
-          />
-          <button
-            onClick={handleLookup}
-            disabled={lookupLoading}
-            className="inline-flex min-h-12 items-center justify-center rounded-full bg-[#173a7a] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#102b5d] disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {lookupLoading ? "Finding..." : "Find Booking"}
-          </button>
-        </div>
-
-        {lookupError ? (
-          <div className="mt-4 rounded-[20px] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {lookupError}
-          </div>
-        ) : null}
-
-        {lookupResult ? (
-          <div className="mt-6 rounded-[28px] border border-slate-200 bg-slate-50 p-5">
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-400">
-              Booking Found
-            </p>
-            <h3 className="mt-2 text-xl font-semibold text-slate-900">
-              {lookupResult.booking_reference}
-            </h3>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <LookupItem
-                label="Status"
-                value={lookupResult.booking_status || "Confirmed"}
-              />
-              <LookupItem
-                label="Dates"
-                value={
-                  [lookupResult.outbound_date, lookupResult.return_date]
-                    .filter(Boolean)
-                    .join(" to ") || "Saved booking"
-                }
-              />
-              <LookupItem
-                label="Created"
-                value={
-                  lookupResult.created_at
-                    ? new Date(lookupResult.created_at).toLocaleString()
-                    : "Saved"
-                }
-              />
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <LookupItem
-                label="Flight"
-                value={getBookedFlightLabel(lookupResult)}
-              />
-              <LookupItem
-                label="Hotel"
-                value={getBookedHotelLabel(lookupResult)}
-              />
-              <LookupItem
-                label="Car"
-                value={getBookedCarLabel(lookupResult)}
-              />
-              <LookupItem
-                label="Total"
-                value={formatCurrency(Number(lookupResult.total_price || 0))}
-              />
-            </div>
-          </div>
-        ) : null}
-      </section>
-
       {!chatOpen ? (
         <button
           type="button"
@@ -1529,8 +1366,8 @@ export default function AIPlannerExperience() {
       {chatOpen ? (
         <>
           <div className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px] xl:hidden">
-            <aside className="absolute inset-0 overflow-hidden bg-[linear-gradient(180deg,#16356f_0%,#1f4f9d_100%)] text-white">
-              <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+            <aside className="absolute inset-0 flex flex-col overflow-hidden bg-[linear-gradient(180deg,#16356f_0%,#1f4f9d_100%)] text-white">
+              <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 py-4">
                 <div className="flex items-center gap-3">
                   <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white text-[#173a7a]">
                     <Bot className="h-5 w-5" />
@@ -1552,13 +1389,14 @@ export default function AIPlannerExperience() {
                 </button>
               </div>
 
-              <div className="h-[calc(100%-76px)] p-4">
+              <div className="min-h-0 flex-1 overflow-hidden p-4">
                 <ChatPanel
                   chatInput={chatInput}
                   chatLoading={chatLoading}
                   messages={messages}
                   onInputChange={setChatInput}
                   onSend={handleSend}
+                  onClear={handleClearChat}
                   showQuickChips={showQuickChips}
                   fullHeight
                 />
@@ -1583,6 +1421,7 @@ export default function AIPlannerExperience() {
               messages={messages}
               onInputChange={setChatInput}
               onSend={handleSend}
+              onClear={handleClearChat}
               showQuickChips={showQuickChips}
               fullHeight
             />
@@ -1610,47 +1449,20 @@ function errorToMessage(error) {
   );
 }
 
-function getBookedFlightLabel(booking) {
-  return (
-    booking.flight_details?.flight_number ||
-    booking.booking_metadata?.selected_flight?.flight_number ||
-    booking.booking_metadata?.selected_flight?.code ||
-    "Not attached"
-  );
-}
-
-function getBookedHotelLabel(booking) {
-  return (
-    booking.hotel_details?.hotel_name ||
-    booking.booking_metadata?.selected_hotel?.hotel_name ||
-    "Not attached"
-  );
-}
-
-function getBookedCarLabel(booking) {
-  if (booking.car_details?.company || booking.car_details?.car_model) {
-    return `${booking.car_details?.company || ""} ${booking.car_details?.car_model || ""}`.trim();
-  }
-
-  const snapshot = booking.booking_metadata?.selected_car;
-  if (snapshot?.company || snapshot?.car_model) {
-    return `${snapshot.company || ""} ${snapshot.car_model || ""}`.trim();
-  }
-
-  return "Not attached";
-}
-
 function ChatPanel({
   chatInput,
   chatLoading,
   messages,
   onInputChange,
   onSend,
+  onClear,
   showQuickChips,
   fullHeight = false,
 }) {
+  const visibleQuickChips = fullHeight ? [] : QUICK_CHIPS;
+
   return (
-    <div className={`p-5 ${fullHeight ? "flex h-full flex-col p-0" : ""}`}>
+    <div className={`p-5 ${fullHeight ? "flex h-full min-h-0 flex-col p-0" : ""}`}>
       {!fullHeight ? (
         <div className="flex items-center gap-3">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-[#173a7a]">
@@ -1668,13 +1480,21 @@ function ChatPanel({
         </div>
       ) : null}
 
-      {showQuickChips ? (
-        <div className={`flex flex-wrap gap-2 ${fullHeight ? "mt-0" : "mt-4"}`}>
-          {QUICK_CHIPS.map((chip) => (
+      {showQuickChips && visibleQuickChips.length > 0 ? (
+        <div
+          className={`${
+            fullHeight
+              ? "mb-2 flex gap-2 overflow-x-auto pb-1 pr-1"
+              : "mt-4 flex flex-wrap gap-2"
+          }`}
+        >
+          {visibleQuickChips.map((chip) => (
             <button
               key={chip}
               onClick={() => onSend(chip)}
-              className="rounded-full border border-white/15 bg-white/10 px-3 py-2 text-xs font-medium text-white/90 transition hover:bg-white/15"
+              className={`rounded-full border border-white/15 bg-white/10 text-xs font-medium text-white/90 transition hover:bg-white/15 ${
+                fullHeight ? "shrink-0 px-3 py-1.5" : "px-3 py-1.5"
+              }`}
             >
               {chip}
             </button>
@@ -1684,10 +1504,10 @@ function ChatPanel({
 
       <div
         className={`rounded-[24px] bg-white/95 p-4 text-slate-900 shadow-[0_14px_40px_rgba(8,15,36,0.16)] ${
-          fullHeight ? "mt-4 flex min-h-0 flex-1 flex-col" : "mt-4"
+          fullHeight ? "flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-3" : "mt-4"
         }`}
       >
-        <div className={`space-y-4 overflow-y-auto pr-1 ${fullHeight ? "min-h-0 flex-1" : "max-h-[320px]"}`}>
+        <div className={`space-y-4 overflow-y-auto pr-1 ${fullHeight ? "min-h-0 flex-1 pb-3" : "max-h-[320px]"}`}>
           {messages.map((message, index) => (
             <div
               key={`${message.role}-${index}`}
@@ -1730,7 +1550,16 @@ function ChatPanel({
           ) : null}
         </div>
 
-        <div className="mt-4 flex flex-col gap-3">
+        <div className="mt-2 flex shrink-0 items-center justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClear}
+            className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-white hover:text-slate-900"
+          >
+            Clear
+          </button>
+        </div>
+        <div className={`mt-2 shrink-0 ${fullHeight ? "grid grid-cols-[minmax(0,1fr)_56px] gap-2 pb-1" : "grid grid-cols-[minmax(0,1fr)_92px] gap-3"}`}>
           <input
             value={chatInput}
             onChange={(event) => onInputChange(event.target.value)}
@@ -1746,10 +1575,11 @@ function ChatPanel({
           <button
             onClick={() => onSend()}
             disabled={chatLoading}
-            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-[#173a7a] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#102b5d] disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-[#173a7a] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#102b5d] disabled:cursor-not-allowed disabled:opacity-60"
+            aria-label="Send message"
           >
             <SendHorizontal className="h-4 w-4" />
-            Send
+            {fullHeight ? null : "Send"}
           </button>
         </div>
       </div>
@@ -1769,6 +1599,29 @@ function formatLocationLabel(location) {
       .join(", ")
       .replace(", (", " (")
   );
+}
+
+function getBookedFlightLabel(booking) {
+  const flight = booking?.flight_details;
+  if (!flight) {
+    return "No flight saved";
+  }
+
+  return [flight.airline || flight.flight_name, flight.flight_number]
+    .filter(Boolean)
+    .join(" ") || "Saved flight";
+}
+
+function dedupeBy(items, getKey) {
+  const seen = new Set();
+  return (items || []).filter((item) => {
+    const key = String(getKey(item) || "");
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function buildPlannerRouteMap(routeOptions, locationTokensFor) {
@@ -2253,17 +2106,6 @@ function SummaryRow({ icon: Icon, text }) {
   );
 }
 
-function LookupItem({ label, value }) {
-  return (
-    <div className="rounded-[20px] border border-slate-200 bg-white p-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-        {label}
-      </p>
-      <p className="mt-2 text-sm font-semibold text-slate-900">{value}</p>
-    </div>
-  );
-}
-
 function PriceRow({ label, value, emphasize = false, highlight = "" }) {
   const numberValue = Number(value || 0);
 
@@ -2532,6 +2374,64 @@ function persistPlannerLoyalty(booking, totalPrice) {
   } catch {
     // Best effort only. Booking confirmation should not fail because of local storage.
   }
+}
+
+function formatBookingPassengers(value) {
+  const count = Math.max(1, Number(value || 1));
+  return `${count} Adult${count === 1 ? "" : "s"}`;
+}
+
+function mapPlannerFlightToBookingSelection(flight) {
+  if (!flight) return null;
+
+  return {
+    id: String(flight.flight_id || flight.id || ""),
+    airline: flight.airline || "SkyBook Air",
+    code: flight.code || flight.flight_number || `FL ${flight.flight_id || flight.id || ""}`,
+    departure: flight.departure_time_display || flight.departure || "--:--",
+    arrival: flight.arrival_time_display || flight.arrival || "--:--",
+    duration: flight.duration_display || flight.duration || "TBD",
+    stops: flight.stops || "Nonstop",
+    price: Number(flight.price || flight.base_price || 0),
+    logo: flight.logo || (flight.airline || "SK").slice(0, 2).toUpperCase(),
+    sourceLabel: flight.provider === "serpapi" ? "Live price" : "Database price",
+  };
+}
+
+function mapPlannerHotelToBookingSelection(hotel) {
+  if (!hotel) return null;
+
+  const nightlyRate =
+    Number(hotel.price_per_night || hotel.pricePerDay || hotel.price || 0) || 0;
+
+  return {
+    id: String(hotel.hotel_id || hotel.id || ""),
+    name: hotel.hotel_name || hotel.name || "Hotel",
+    rating: Number(hotel.rating || 0),
+    pricePerDay: nightlyRate,
+    location: `${hotel.city || hotel.location || "City"}${hotel.country_name ? `, ${hotel.country_name}` : ""}`,
+    details: hotel.description || "Selected stay",
+    image: hotel.image_url || hotel.image || "",
+    sourceLabel: nightlyRate > 0 ? "Reference price" : "Price pending",
+  };
+}
+
+function mapPlannerCarToBookingSelection(car) {
+  if (!car) return null;
+
+  return {
+    id: String(car.car_id || car.id || ""),
+    name: `${car.company || "Rental"} ${car.car_model || car.name || "Car"}`.trim(),
+    rating: Number(car.rating || 4.5),
+    pricePerDay: Number(car.price_per_day || car.pricePerDay || car.price || 0),
+    type: car.car_type || car.type || "Standard",
+    details: car.description || "Selected rental car",
+    image: car.image_url || car.image || "",
+    sourceLabel: "Available now",
+    seats: Number(car.car_seats || car.seats || 4),
+    availability: car.availability !== false,
+    carType: car.car_type || car.type || "Standard",
+  };
 }
 
 function safeParseStorage(key, fallback) {

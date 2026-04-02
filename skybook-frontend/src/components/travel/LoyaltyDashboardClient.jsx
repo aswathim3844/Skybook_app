@@ -10,25 +10,35 @@ const BOOKING_HISTORY_KEY = "skybook-ai-bookings";
 
 export default function LoyaltyDashboardClient() {
   const customer = useAuthStore((state) => state.customer);
-  const [loyalty, setLoyalty] = useState(() => {
+  const summary = useAuthStore((state) => state.summary);
+  const [loyalty, setLoyalty] = useState({
+    name: "",
+    miles: 0,
+    trips: 0,
+    memberSince: null,
+  });
+
+  useEffect(() => {
     const storedLoyalty = safeParseStorage(LOYALTY_KEY);
     if (storedLoyalty) {
-      return storedLoyalty;
+      setLoyalty(storedLoyalty);
+      return;
     }
 
     const storedBookings = safeParseStorage(BOOKING_HISTORY_KEY, []);
-    const computedMiles = storedBookings.reduce(
-      (total, booking) => total + Number(booking.total_price || 0),
-      4250
+    const normalizedBookings = Array.isArray(storedBookings) ? storedBookings : [];
+    const computedMiles = normalizedBookings.reduce(
+      (total, booking) => total + Number(booking.milesEarned || booking.total_price || 0),
+      0
     );
 
-    return {
+    setLoyalty({
       name: "",
       miles: computedMiles,
-      trips: Math.max(3, storedBookings.length || 3),
-      memberSince: "Jan 2026",
-    };
-  });
+      trips: normalizedBookings.length || 0,
+      memberSince: null,
+    });
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -37,7 +47,18 @@ export default function LoyaltyDashboardClient() {
   }, [loyalty]);
 
   const displayName = customer?.name?.trim() || customer?.email?.split("@")[0] || loyalty.name || "Traveler";
-  const loyaltyView = useMemo(() => ({ ...loyalty, name: displayName }), [displayName, loyalty]);
+  const loyaltyView = useMemo(() => {
+    const persistedMiles = Number(loyalty?.miles || 0);
+    const backendMiles = Number(summary?.loyalty_miles ?? summary?.loyalty_points ?? 0);
+    const tripsTaken = Math.max(Number(summary?.booking_count || 0), Number(loyalty?.trips || 0));
+    return {
+      ...loyalty,
+      name: displayName,
+      miles: Math.max(persistedMiles, backendMiles),
+      trips: tripsTaken,
+      memberSince: formatMemberSince(loyalty?.joinedAt || customer?.created_at || loyalty?.memberSince),
+    };
+  }, [customer?.created_at, displayName, loyalty, summary?.booking_count, summary?.loyalty_miles, summary?.loyalty_points]);
   const tier = useMemo(() => getTierFromMiles(loyaltyView.miles), [loyaltyView.miles]);
   const rewardProgress = Math.min((loyaltyView.miles % 10000) / 100, 100);
 
@@ -54,8 +75,8 @@ export default function LoyaltyDashboardClient() {
                 Welcome, {loyaltyView.name}
               </h1>
               <p className="mt-4 max-w-lg text-base leading-7 text-blue-100/90">
-                Your loyalty wallet is now separate from the AI Planner, with tier perks,
-                reward progress, and trip value all in one premium dashboard.
+                Track the miles you have earned from confirmed bookings, see your current tier,
+                and understand what rewards unlock as your travel spend grows.
               </p>
 
               <div className="group relative mt-6 inline-flex">
@@ -72,7 +93,7 @@ export default function LoyaltyDashboardClient() {
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <MetricCard icon={Sparkles} label="Miles Balance" value={`${loyaltyView.miles.toLocaleString()} miles`} />
-              <MetricCard icon={ShieldCheck} label="Trips Taken" value={`${loyaltyView.trips} trips`} />
+              <MetricCard icon={ShieldCheck} label="Confirmed Trips" value={`${loyaltyView.trips} trips`} />
               <MetricCard icon={Zap} label="Miles to Next Tier" value={describeMilesToNextTier(loyaltyView.miles)} />
               <MetricCard icon={Star} label="Member Since" value={loyaltyView.memberSince} />
             </div>
@@ -86,7 +107,7 @@ export default function LoyaltyDashboardClient() {
                   <p className="text-sm font-semibold uppercase tracking-[0.18em] text-orange-200">
                     Next Reward
                   </p>
-                  <p className="mt-1 text-lg font-semibold">10,000 miles = $100 off</p>
+                  <p className="mt-1 text-lg font-semibold">10,000 miles = $100 booking credit</p>
                 </div>
               </div>
 
@@ -97,7 +118,7 @@ export default function LoyaltyDashboardClient() {
                 />
               </div>
               <p className="mt-3 text-sm text-blue-100/85">
-                {(loyaltyView.miles % 10000).toLocaleString()} / 10,000 miles toward your next reward
+                {(loyaltyView.miles % 10000).toLocaleString()} / 10,000 miles toward your next travel credit
               </p>
 
               <button
@@ -117,7 +138,7 @@ export default function LoyaltyDashboardClient() {
             Membership Benefits
           </p>
           <h2 className="mt-3 text-2xl font-semibold text-slate-900">
-            Your current tier perks
+            Your current booking-linked perks
           </h2>
           <div className="mt-6 grid gap-4 md:grid-cols-3">
             {tier.cards.map((card) => (
@@ -178,11 +199,11 @@ function getTierFromMiles(miles) {
     return {
       label: "PLATINUM",
       badgeClassName: "bg-cyan-50 text-cyan-700",
-      benefits: "Unlimited lounge, dedicated support, 4 upgrades, chauffeur",
+      benefits: "Priority support, waived service fees, flexible changes, and the fastest mile earning rate.",
       cards: [
-        { title: "Unlimited Lounge", copy: "Relax in partner lounges on every eligible itinerary." },
-        { title: "Dedicated Support", copy: "Priority care from a premium concierge support team." },
-        { title: "Premium Ground Perks", copy: "Four upgrades and chauffeur-style transfer perks each year." },
+        { title: "25% Bonus Miles", copy: "Earn miles faster on every eligible confirmed booking." },
+        { title: "Flexible Booking Help", copy: "Get priority support and reduced change friction on supported trips." },
+        { title: "Waived Service Fees", copy: "Selected service fees are reduced or removed for top-tier members." },
       ],
     };
   }
@@ -191,11 +212,11 @@ function getTierFromMiles(miles) {
     return {
       label: "GOLD",
       badgeClassName: "bg-amber-50 text-amber-700",
-      benefits: "Lounge access, 2 free upgrades, extra baggage allowance",
+      benefits: "Bonus miles, faster support, and extra flexibility on eligible bookings.",
       cards: [
-        { title: "Lounge Access", copy: "Use selected lounges before eligible departures." },
-        { title: "Priority Comfort", copy: "Enjoy two upgrades and extra baggage flexibility." },
-        { title: "Faster Travel Days", copy: "Shorter queues and smoother airport handling when available." },
+        { title: "15% Bonus Miles", copy: "Boost your earning rate on future flights and packages." },
+        { title: "Priority Support", copy: "Reach customer support faster for active and upcoming trips." },
+        { title: "Flexible Changes", copy: "Enjoy friendlier change support on selected booking types." },
       ],
     };
   }
@@ -203,11 +224,11 @@ function getTierFromMiles(miles) {
   return {
     label: "SILVER",
     badgeClassName: "bg-slate-100 text-slate-700",
-    benefits: "Priority check-in, 1 free seat upgrade per year",
+    benefits: "Base miles earning, member offers, and access to reward redemptions.",
     cards: [
-      { title: "Priority Check-in", copy: "Move through the airport faster with preferred counters." },
-      { title: "Annual Upgrade", copy: "Use one complimentary seat upgrade every membership year." },
-      { title: "Member Pricing", copy: "See loyalty-focused rewards and milestone redemption progress." },
+      { title: "Base Miles Earn", copy: "Earn 1 mile for each eligible booking dollar spent." },
+      { title: "Member Offers", copy: "See rewards-focused offers and milestone progress in one place." },
+      { title: "Reward Access", copy: "Redeem miles for booking credits once you hit reward thresholds." },
     ],
   };
 }
@@ -222,15 +243,28 @@ function describeMilesToNextTier(miles) {
   return `${(5000 - miles).toLocaleString()} miles to Gold`;
 }
 
-function safeParseStorage(key) {
+function safeParseStorage(key, fallback = null) {
   if (typeof window === "undefined") {
-    return null;
+    return fallback;
   }
 
   try {
     const raw = window.localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
+    return raw ? JSON.parse(raw) : fallback;
   } catch {
-    return null;
+    return fallback;
   }
+}
+
+function formatMemberSince(value) {
+  if (!value) {
+    return "New member";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "New member";
+  }
+
+  return parsed.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }

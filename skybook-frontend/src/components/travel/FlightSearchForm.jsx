@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { fetchFlightLocations, fetchFlightRoutes } from "@/lib/api";
+import PassengerSelector from "@/components/travel/PassengerSelector";
 import { buildBookingQuery, useBookingStore } from "@/lib/booking-store";
 
 const tripTypeOptions = [
@@ -414,7 +415,7 @@ export default function FlightSearchForm({
       {search.tripType === "multicity" ? (
         <div className="mt-7 rounded-[32px] border border-slate-200 bg-slate-50 p-3 shadow-sm sm:p-4">
           {search.multiCitySegments.map((segment, index) => (
-            <div key={segment.id} className="relative z-10 mb-3 last:mb-0">
+            <div key={segment.id} className="relative mb-3 last:mb-0">
               <div className="mb-2 flex items-center justify-between gap-3 px-2">
                 <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
                   Flight {index + 1}
@@ -505,16 +506,10 @@ export default function FlightSearchForm({
 
           <div className="mt-4 flex flex-wrap items-center justify-end gap-4">
             <FieldCard icon={Users} label="Passengers" error={errors.passengers} className="w-full md:max-w-[260px]">
-              <select
+              <PassengerSelector
                 value={search.passengers}
-                onChange={(event) => handleFieldChange("passengers", event.target.value)}
-                className="w-full bg-transparent text-base font-semibold text-slate-900 outline-none"
-              >
-                <option>1 Adult</option>
-                <option>2 Adults</option>
-                <option>2 Adults, 1 Child</option>
-                <option>4 Travelers</option>
-              </select>
+                onChange={(value) => handleFieldChange("passengers", value)}
+              />
             </FieldCard>
           </div>
         </div>
@@ -575,31 +570,19 @@ export default function FlightSearchForm({
             </FieldCard>
           ) : (
             <FieldCard icon={Users} label="Passengers" error={errors.passengers}>
-              <select
+              <PassengerSelector
                 value={search.passengers}
-                onChange={(event) => handleFieldChange("passengers", event.target.value)}
-                className="w-full bg-transparent text-base font-semibold text-slate-900 outline-none"
-              >
-                <option>1 Adult</option>
-                <option>2 Adults</option>
-                <option>2 Adults, 1 Child</option>
-                <option>4 Travelers</option>
-              </select>
+                onChange={(value) => handleFieldChange("passengers", value)}
+              />
             </FieldCard>
           )}
 
           {search.tripType === "roundtrip" ? (
             <FieldCard icon={Users} label="Passengers" error={errors.passengers}>
-              <select
+              <PassengerSelector
                 value={search.passengers}
-                onChange={(event) => handleFieldChange("passengers", event.target.value)}
-                className="w-full bg-transparent text-base font-semibold text-slate-900 outline-none"
-              >
-                <option>1 Adult</option>
-                <option>2 Adults</option>
-                <option>2 Adults, 1 Child</option>
-                <option>4 Travelers</option>
-              </select>
+                onChange={(value) => handleFieldChange("passengers", value)}
+              />
             </FieldCard>
           ) : (
             <div />
@@ -806,7 +789,7 @@ function LocationInput({
   }
 
   return (
-    <div className="relative">
+    <div className={`relative ${isOpen ? "z-40" : "z-10"}`}>
       <input
         value={value}
         onChange={(event) => {
@@ -822,7 +805,7 @@ function LocationInput({
         className="w-full bg-transparent text-base font-semibold text-slate-900 outline-none"
       />
       {isOpen && filteredOptions.length > 0 ? (
-        <div className="absolute left-0 right-0 top-[calc(100%+0.65rem)] z-20 overflow-hidden rounded-[18px] border border-slate-200 bg-white shadow-[0_18px_40px_rgba(15,23,42,0.14)]">
+        <div className="absolute left-0 right-0 top-[calc(100%+0.65rem)] z-50 overflow-hidden rounded-[18px] border border-slate-200 bg-white shadow-[0_18px_40px_rgba(15,23,42,0.14)]">
           {filteredOptions.map((location) => (
             <button
               key={location.id || location.label}

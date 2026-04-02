@@ -23,7 +23,7 @@ import {
   createBooking,
   fetchCars,
   fetchFlights,
-  fetchHotelOffer,
+  fetchAllHotels,
   fetchHotels,
   fetchReferenceHotels,
 } from "@/lib/api";
@@ -102,7 +102,7 @@ export function FlightResultsScreen({ initialParams }) {
   const isFlightSaved = useSavedStore((state) => state.isFlightSaved);
   const duration = getTripDuration(search.departure, search.returnDate);
   const tripType = search.tripType || "roundtrip";
-  const multiCitySegments = search.multiCitySegments || [];
+  const multiCitySegments = useMemo(() => search.multiCitySegments || [], [search.multiCitySegments]);
   const searchFrom = search.from;
   const searchTo = search.to;
   const searchDeparture = search.departure;
@@ -238,9 +238,9 @@ export function FlightResultsScreen({ initialParams }) {
         }
         description={
           tripType === "roundtrip"
-            ? `Showing PostgreSQL-backed results for ${search.departure} to ${search.returnDate}. Passengers: ${search.passengers}.`
+            ? `Explore options for ${search.departure} to ${search.returnDate}. Travelers: ${search.passengers}.`
             : tripType === "oneway"
-              ? `One-way results for ${search.departure}. Passengers: ${search.passengers}.`
+              ? `Explore one-way options for ${search.departure}. Travelers: ${search.passengers}.`
               : `Review flight options for ${multiCitySegments.length} connected legs.`
         }
         actions={<SecondaryLink href="/search-flights">Edit search</SecondaryLink>}
@@ -556,14 +556,12 @@ export function ReturnFlightSelectionScreen({ initialParams }) {
             <BudgetSidebar
               compact
               tripType="roundtrip"
-              flight={{
-                ...(selectedFlight || {}),
-                price:
-                  (selectedFlight?.price || 0) +
-                  (activeFlights.find((flight) => flight.id === selectedReturnFlightId)?.price ||
-                    activeFlights[0]?.price ||
-                    0),
-              }}
+              flight={selectedFlight}
+              returnFlight={
+                activeFlights.find((flight) => flight.id === selectedReturnFlightId) ||
+                activeFlights[0] ||
+                null
+              }
               hotel={null}
               car={null}
               duration={Math.max(getTripDuration(search.departure, search.returnDate), 1)}
@@ -597,12 +595,9 @@ export function HotelSelectionScreen({ initialParams }) {
   const [hotels, setHotels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [hotelOfferLoadingId, setHotelOfferLoadingId] = useState(null);
-  const [pricingNotice, setPricingNotice] = useState("");
   const [filters, setFilters] = useState({
     minRating: "any",
     maxPrice: "",
-    priceSource: "all",
     sortBy: "recommended",
   });
   const toggleSavedHotel = useSavedStore((state) => state.toggleSavedHotel);
@@ -610,6 +605,18 @@ export function HotelSelectionScreen({ initialParams }) {
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const tripType = search.tripType || "roundtrip";
   const destinationCity = search.to;
+  const summaryHref = `/booking-summary?${buildBookingQuery({
+    search,
+    flightId: selectedFlightId || selectedFlight?.id,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+    hotelId: selectedHotelId || null,
+  })}`;
+  const carRentalHref = `/car-rental?${buildBookingQuery({
+    search,
+    flightId: selectedFlightId || selectedFlight?.id,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+    hotelId: selectedHotelId || null,
+  })}`;
 
   useEffect(() => {
     let active = true;
@@ -618,97 +625,85 @@ export function HotelSelectionScreen({ initialParams }) {
       try {
         setLoading(true);
         setError("");
-        setPricingNotice("");
-        const data = await fetchHotels({
-          to: destinationCity,
-          passengers: search.passengers,
-        });
-        const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
-        const fallbackHotel = fallbackHotels[0] || null;
-        const candidates = data.slice(0, 4);
-        const pricedHotels = await Promise.all(
-          candidates.map(async (hotel) => {
-            try {
-              const offer = await fetchHotelOffer({
-                hotel: {
-                  hotel_id: hotel.id,
-                  hotel_name: hotel.name,
-                  city: hotel.location?.split(",")[0] || destinationCity,
-                  country_name: hotel.location?.split(",").slice(1).join(",").trim(),
-                  provider_reference: hotel.id,
-                  provider_metadata: hotel.providerMetadata || {},
-                },
-                city: destinationCity,
-                checkin_date: search.departure,
-                checkout_date: search.returnDate,
-                adults_number: extractPassengerCount(search.passengers),
-              });
+        let nextHotels = [];
 
-              if (offer.sold_out && fallbackHotel) {
-                return {
-                  ...hotel,
-                  pricePerDay: fallbackHotel.pricePerDay,
-                  pricingPending: false,
-                  priceLabel: "Reference price",
-                  details: "Live offer unavailable. Showing reference hotel pricing from local inventory.",
-                  isFallbackPrice: true,
-                  sourceLabel: "Reference price",
-                };
-              }
+        try {
+          const liveHotels = await fetchHotels({
+            to: destinationCity,
+            passengers: search.passengers,
+          });
 
-              return {
-                ...hotel,
-                pricePerDay: Number(offer.price_per_night || hotel.pricePerDay || 0),
-                pricingPending: Boolean(offer.pricing_pending),
-                priceLabel: offer.price_display || hotel.priceLabel || null,
-                details: offer.offer_message || hotel.details,
-                soldOut: Boolean(offer.sold_out),
-                isFallbackPrice: false,
-                sourceLabel: "Live price",
-              };
-            } catch {
-              if (!fallbackHotel) {
-                return hotel;
-              }
+          nextHotels = (liveHotels || []).map((hotel) => ({
+            ...hotel,
+            pricePerDay: Number(hotel.pricePerDay || 0) > 0 ? Number(hotel.pricePerDay) : getStaticHotelReferencePrice(hotel),
+            pricingPending: false,
+            priceLabel: "Reference price",
+            details:
+              hotel.details ||
+              "Showing SkyBook hotel pricing for a stable booking experience.",
+            isFallbackPrice: true,
+            sourceLabel: "Reference price",
+          }));
+        } catch {
+          nextHotels = [];
+        }
 
-              return {
-                ...hotel,
-                pricePerDay: fallbackHotel.pricePerDay,
-                pricingPending: false,
-                priceLabel: "Reference price",
-                details: "Live offer unavailable. Showing reference hotel pricing from local inventory.",
-                isFallbackPrice: true,
-                sourceLabel: "Reference price",
-              };
-            }
-          })
-        );
+        if (nextHotels.length === 0) {
+          try {
+            const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
+            nextHotels = (fallbackHotels || []).map((hotel) => ({
+              ...hotel,
+              pricePerDay: getStaticHotelReferencePrice(hotel),
+              pricingPending: false,
+              priceLabel: "Reference price",
+              details:
+                hotel.details ||
+                "Showing SkyBook reference hotel pricing for a stable booking experience.",
+              isFallbackPrice: true,
+              sourceLabel: "Reference price",
+            }));
+          } catch {
+            nextHotels = [];
+          }
+        }
 
-        const remainingHotels = data.slice(candidates.length);
-        const nextHotels = [...pricedHotels, ...remainingHotels];
+        if (nextHotels.length === 0) {
+          const allHotels = await fetchAllHotels();
+          const destinationToken = String(destinationCity || "")
+            .split(",")[0]
+            .trim()
+            .toLowerCase();
+
+          nextHotels = (allHotels || [])
+            .filter((hotel) => {
+              const location = String(hotel.location || "").toLowerCase();
+              return !destinationToken || location.includes(destinationToken);
+            })
+            .map((hotel) => ({
+              ...hotel,
+              pricePerDay: Number(hotel.pricePerDay || 0) > 0 ? Number(hotel.pricePerDay) : getStaticHotelReferencePrice(hotel),
+              pricingPending: false,
+              priceLabel: "Reference price",
+              details:
+                hotel.details ||
+                "Showing SkyBook static hotel pricing for a stable booking experience.",
+              isFallbackPrice: true,
+              sourceLabel: "Reference price",
+            }));
+        }
 
         if (active) {
           setHotels(nextHotels);
-          if (pricedHotels.some((hotel) => hotel.isFallbackPrice)) {
-            setPricingNotice("Some hotel prices are live. Others are reference prices from local inventory when live offers were unavailable.");
-          }
         }
       } catch (err) {
         if (active) {
-          try {
-            const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
-            setHotels(fallbackHotels);
-            setPricingNotice("Live hotel pricing could not be preloaded. Showing reference hotel pricing from local inventory.");
-            setError("");
-          } catch {
-            setError(
-              getFriendlyErrorMessage(
-                err,
-                "We could not load hotels for this destination.",
-                "hotel-search"
-              )
-            );
-          }
+          setError(
+            getFriendlyErrorMessage(
+              err,
+              "We could not load hotels for this destination.",
+              "hotel-search"
+            )
+          );
         }
       } finally {
         if (active) {
@@ -735,17 +730,7 @@ export function HotelSelectionScreen({ initialParams }) {
             return false;
           }
 
-          if (!hotel.pricingPending && filters.maxPrice && Number(hotel.pricePerDay || 0) > Number(filters.maxPrice)) {
-            return false;
-          }
-
-          if (filters.priceSource === "live" && hotel.sourceLabel !== "Live price") {
-            return false;
-          }
-          if (filters.priceSource === "reference" && hotel.sourceLabel !== "Reference price") {
-            return false;
-          }
-          if (filters.priceSource === "pending" && hotel.sourceLabel !== "Price pending") {
+          if (filters.maxPrice && Number(hotel.pricePerDay || 0) > Number(filters.maxPrice)) {
             return false;
           }
 
@@ -774,7 +759,7 @@ export function HotelSelectionScreen({ initialParams }) {
       <PageHero
         eyebrow="Hotel Selection"
         title="Choose a hotel to complete the trip"
-        description="This step keeps the user focused on one choice at a time while loading real hotel data from PostgreSQL."
+        description="Compare stays for your destination and choose the one that suits your trip best."
       >
         <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
           <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Selected flight</p>
@@ -815,100 +800,22 @@ export function HotelSelectionScreen({ initialParams }) {
                   key={hotel.id}
                   item={hotel}
                   buttonLabel={
-                    hotelOfferLoadingId === hotel.id
-                      ? "Checking price..."
-                      : selectedHotelId === hotel.id
+                    selectedHotelId === hotel.id
                         ? "Selected"
                         : "Select hotel"
                   }
                   isSaved={isHotelSaved(hotel.id)}
                   onToggleSave={() => toggleSavedHotel(hotel)}
-                  onSelect={async () => {
-                    setError("");
-                    setHotelOfferLoadingId(hotel.id);
-
-                    try {
-                      const offer = await fetchHotelOffer({
-                        hotel: {
-                          hotel_id: hotel.id,
-                          hotel_name: hotel.name,
-                          city: hotel.location?.split(",")[0] || destinationCity,
-                          country_name: hotel.location?.split(",").slice(1).join(",").trim(),
-                          provider_reference: hotel.id,
-                          provider_metadata: hotel.providerMetadata || {},
-                        },
-                        city: destinationCity,
-                        checkin_date: search.departure,
-                        checkout_date: search.returnDate,
-                        adults_number: extractPassengerCount(search.passengers),
-                      });
-
-                      const normalizedHotel = {
-                        ...hotel,
-                        pricePerDay: Number(offer.price_per_night || hotel.pricePerDay || 0),
-                        pricingPending: Boolean(offer.pricing_pending),
-                        priceLabel: offer.price_display || hotel.priceLabel || null,
-                        details: offer.offer_message || hotel.details,
-                        soldOut: Boolean(offer.sold_out),
-                        sourceLabel: offer.sold_out ? hotel.sourceLabel : "Live price",
-                      };
-
-                      if (offer.sold_out) {
-                        const fallbackHotels = await fetchReferenceHotels({ to: destinationCity });
-                        const fallbackHotel = fallbackHotels[0];
-
-                        if (!fallbackHotel) {
-                          setError(
-                            getFriendlyErrorMessage(
-                              { message: offer.offer_message || "" },
-                              "This hotel does not have rooms for the selected dates.",
-                              "hotel-offer"
-                            )
-                          );
-                          return;
-                        }
-
-                        const normalizedHotel = {
-                          ...fallbackHotel,
-                          details: "Live offer unavailable. Showing reference hotel pricing from local inventory.",
-                          priceLabel: "Reference price",
-                          pricingPending: false,
-                          providerMetadata: hotel.providerMetadata || null,
-                          sourceLabel: "Reference price",
-                        };
-
-                        selectHotel(normalizedHotel);
-                        router.push(
-                          `/car-rental?${buildBookingQuery({
-                            search,
-                            flightId: selectedFlightId || safeFlight.id,
-                            returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
-                            hotelId: normalizedHotel.id,
-                          })}`
-                        );
-                        return;
-                      }
-
-                      selectHotel(normalizedHotel);
-                      router.push(
-                        `/car-rental?${buildBookingQuery({
-                          search,
-                          flightId: selectedFlightId || safeFlight.id,
-                          returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
-                          hotelId: hotel.id,
-                        })}`
-                      );
-                    } catch (err) {
-                      setError(
-                        getFriendlyErrorMessage(
-                          err,
-                          "We could not confirm a live hotel price for this option.",
-                          "hotel-offer"
-                        )
-                      );
-                    } finally {
-                      setHotelOfferLoadingId(null);
-                    }
+                  onSelect={() => {
+                    selectHotel(hotel);
+                    router.push(
+                      `/car-rental?${buildBookingQuery({
+                        search,
+                        flightId: selectedFlightId || safeFlight.id,
+                        returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+                        hotelId: hotel.id,
+                      })}`
+                    );
                   }}
                 />
               ))}
@@ -922,10 +829,27 @@ export function HotelSelectionScreen({ initialParams }) {
               compact
               tripType={tripType}
               flight={safeFlight}
+              returnFlight={selectedReturnFlight}
               hotel={activeHotel}
               car={null}
               duration={duration}
             />
+            <div className="mt-4 space-y-3">
+              <button
+                type="button"
+                onClick={() => router.push(carRentalHref)}
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300"
+              >
+                Skip hotel and view cars
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push(summaryHref)}
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300"
+              >
+                Continue without hotel and car
+              </button>
+            </div>
           </div>
         </aside>
       </section>
@@ -969,6 +893,13 @@ export function CarRentalScreen({ initialParams }) {
     hotelId: selectedHotelId || selectedHotel?.id || null,
     carId: selectedCarId || null,
   });
+  const summaryHref = `/booking-summary?${buildBookingQuery({
+    search,
+    flightId: selectedFlightId || selectedFlight?.id,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+    hotelId: selectedHotelId || selectedHotel?.id,
+    carId: selectedCarId || null,
+  })}`;
 
   useEffect(() => {
     let active = true;
@@ -1054,7 +985,7 @@ export function CarRentalScreen({ initialParams }) {
       <PageHero
         eyebrow="Car Rental"
         title="Add a rental car if the trip needs local mobility"
-        description="Cars are now fetched from your Django API using the trip destination as the lookup."
+        description="Choose a rental car that fits your destination, travel dates, and group size."
       >
         <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
           <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Current package</p>
@@ -1116,10 +1047,20 @@ export function CarRentalScreen({ initialParams }) {
               compact
               tripType={tripType}
               flight={selectedFlight}
+              returnFlight={selectedReturnFlight}
               hotel={selectedHotel}
               car={activeCar}
               duration={duration}
             />
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => router.push(summaryHref)}
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300"
+              >
+                Continue without car
+              </button>
+            </div>
           </div>
         </aside>
       </section>
@@ -1130,6 +1071,8 @@ export function CarRentalScreen({ initialParams }) {
 }
 
 export function BookingSummaryScreen({ initialParams }) {
+  const router = useRouter();
+  const customer = useAuthStore((state) => state.customer);
   const {
     search,
     selectedFlightId,
@@ -1140,6 +1083,10 @@ export function BookingSummaryScreen({ initialParams }) {
     selectedReturnFlight,
     selectedHotel,
     selectedCar,
+    clearFlight,
+    clearReturnFlight,
+    clearHotel,
+    clearCar,
   } = useBookingSnapshot(initialParams);
   const duration = Math.max(getTripDuration(search.departure, search.returnDate), 1);
   const hotelTotal = (selectedHotel?.pricePerDay || 0) * duration;
@@ -1152,6 +1099,40 @@ export function BookingSummaryScreen({ initialParams }) {
     hotelId: selectedHotelId || selectedHotel?.id || null,
     carId: selectedCarId || selectedCar?.id || null,
   });
+  const flightResultsHref = `/flight-results?${buildBookingQuery({ search })}`;
+  const summaryHref = `/booking-summary?${buildBookingQuery({
+    search,
+    flightId: selectedFlightId || selectedFlight?.id,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+    hotelId: selectedHotelId || selectedHotel?.id,
+    carId: selectedCarId || selectedCar?.id,
+  })}`;
+  const paymentHref = `/payment?${buildBookingQuery({
+    search,
+    flightId: selectedFlightId || selectedFlight?.id,
+    returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+    hotelId: selectedHotelId || selectedHotel?.id,
+    carId: selectedCarId || selectedCar?.id,
+  })}`;
+  const authRedirectHref = `/login?redirect=${encodeURIComponent(summaryHref)}`;
+
+  const handleRemoveFlight = () => {
+    clearFlight();
+    router.push(flightResultsHref);
+  };
+
+  const handleRemoveReturnFlight = () => {
+    clearReturnFlight();
+    router.push(flightResultsHref);
+  };
+
+  const handleRemoveHotel = () => {
+    clearHotel();
+  };
+
+  const handleRemoveCar = () => {
+    clearCar();
+  };
 
   return (
     <>
@@ -1159,25 +1140,24 @@ export function BookingSummaryScreen({ initialParams }) {
       <PageHero
         eyebrow="Booking Summary"
         title="Review the final package before payment"
-        description="This summary is now built from the selections loaded out of the shared booking state and database-backed lists."
+        description="Take one final look at your trip details before you complete payment."
       >
         <SummaryPanel
           flight={selectedFlight}
           returnFlight={selectedReturnFlight}
           hotel={selectedHotel}
           car={selectedCar}
+          search={search}
           duration={duration}
           total={total}
-          ctaHref={`/payment?${buildBookingQuery({
-            search,
-            flightId: selectedFlightId || selectedFlight.id,
-            returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
-            hotelId: selectedHotelId || selectedHotel?.id,
-            carId: selectedCarId || selectedCar?.id,
-          })}`}
-          ctaLabel="Confirm Booking"
+          ctaHref={customer ? paymentHref : authRedirectHref}
+          ctaLabel={customer ? "Confirm Booking" : "Sign in or create account"}
           title="Trip package summary"
           description={`Hotel and car totals are multiplied by ${duration} days.`}
+          onRemoveFlight={handleRemoveFlight}
+          onRemoveReturnFlight={handleRemoveReturnFlight}
+          onRemoveHotel={selectedHotelId ? handleRemoveHotel : null}
+          onRemoveCar={selectedCarId ? handleRemoveCar : null}
         />
       </PageHero>
 
@@ -1190,6 +1170,8 @@ export function BookingSummaryScreen({ initialParams }) {
           label="Outbound Flight"
           title={selectedFlight.airline}
           detail={`${selectedFlight.departure} to ${selectedFlight.arrival} | ${selectedFlight.duration}`}
+          actionLabel="Remove"
+          onAction={handleRemoveFlight}
         />
         {tripType === "roundtrip" ? (
           <SummaryCard
@@ -1200,17 +1182,23 @@ export function BookingSummaryScreen({ initialParams }) {
                 ? `${selectedReturnFlight.departure} to ${selectedReturnFlight.arrival} | ${selectedReturnFlight.duration}`
                 : "Add a return flight before checkout"
             }
+            actionLabel={selectedReturnFlight ? "Remove" : null}
+            onAction={selectedReturnFlight ? handleRemoveReturnFlight : null}
           />
         ) : null}
         <SummaryCard
           label="Selected Hotel"
           title={selectedHotel?.name || "No hotel"}
           detail={`${selectedHotel?.rating || 0} rating | ${duration} nights`}
+          actionLabel={selectedHotelId ? "Remove" : null}
+          onAction={selectedHotelId ? handleRemoveHotel : null}
         />
         <SummaryCard
           label="Selected Car"
           title={selectedCar?.name || "No car"}
           detail={selectedCar?.type || "No car selected"}
+          actionLabel={selectedCarId ? "Remove" : null}
+          onAction={selectedCarId ? handleRemoveCar : null}
         />
       </section>
 
@@ -1265,7 +1253,7 @@ export function PaymentScreen({ initialParams }) {
     ((tripType === "hotel-only" && selectedHotelId) ||
       (tripType === "car-only" && selectedCarId) ||
       (selectedFlightId &&
-        (tripType === "multicity" || (selectedHotelId && selectedCarId)))) &&
+        (tripType === "multicity" || tripType === "oneway" || tripType === "roundtrip"))) &&
       (tripType !== "roundtrip" || selectedReturnFlightId)
   );
 
@@ -1317,6 +1305,22 @@ export function PaymentScreen({ initialParams }) {
       return;
     }
 
+    if (!customer?.customer_id) {
+      setError("Please sign in before completing payment so this booking is saved to your account.");
+      router.push(
+        `/login?redirect=${encodeURIComponent(
+          `/booking-summary?${buildBookingQuery({
+            search,
+            flightId: selectedFlightId || selectedFlight?.id,
+            returnFlightId: selectedReturnFlightId || selectedReturnFlight?.id,
+            hotelId: selectedHotelId || selectedHotel?.id,
+            carId: selectedCarId || selectedCar?.id,
+          })}`,
+        )}`,
+      );
+      return;
+    }
+
     if (!hasBookingSelection) {
       setError(
         tripType === "multicity"
@@ -1325,7 +1329,9 @@ export function PaymentScreen({ initialParams }) {
             ? "This payment page is missing the selected hotel. Please go back and choose a hotel again."
             : tripType === "car-only"
               ? "This payment page is missing the selected car. Please go back and choose a car again."
-            : "This payment page is missing the selected flight, hotel, or car. Please go back to the booking summary and reopen payment."
+            : tripType === "roundtrip"
+              ? "This payment page is missing the selected outbound or return flight. Please go back and choose the required flight details again."
+              : "This payment page is missing the selected flight. Please go back and choose a flight again."
       );
       return;
     }
@@ -1376,13 +1382,13 @@ export function PaymentScreen({ initialParams }) {
       <PageHero
         eyebrow="Payment"
         title="Complete payment"
-        description="This step now creates a real booking row in PostgreSQL through the Django API."
+        description="Complete your payment to confirm the trip and lock in your selections."
       >
         <div className="rounded-[32px] border border-white/15 bg-white/10 p-6 text-white backdrop-blur-sm">
           <p className="text-sm uppercase tracking-[0.22em] text-orange-300">Amount due</p>
           <p className="mt-3 text-4xl font-semibold">{formatCurrency(total)}</p>
           <p className="mt-2 text-sm text-blue-100/85">
-            Use this to verify end-to-end booking creation.
+            Review the amount due before you confirm your booking.
           </p>
         </div>
       </PageHero>
@@ -1397,6 +1403,9 @@ export function PaymentScreen({ initialParams }) {
               value={paymentForm.cardHolder}
               onChange={(event) => handleFieldChange("cardHolder", event.target.value)}
               error={fieldErrors.cardHolder}
+              autoComplete="off"
+              name="skybook_card_holder"
+              data-form-type="other"
             />
             <Input
               label="Card number"
@@ -1404,6 +1413,10 @@ export function PaymentScreen({ initialParams }) {
               value={paymentForm.cardNumber}
               onChange={(event) => handleFieldChange("cardNumber", event.target.value)}
               error={fieldErrors.cardNumber}
+              autoComplete="off"
+              inputMode="numeric"
+              name="skybook_card_number"
+              data-form-type="other"
             />
             <Input
               label="Expiry"
@@ -1411,6 +1424,10 @@ export function PaymentScreen({ initialParams }) {
               value={paymentForm.expiry}
               onChange={(event) => handleFieldChange("expiry", event.target.value)}
               error={fieldErrors.expiry}
+              autoComplete="off"
+              inputMode="numeric"
+              name="skybook_card_expiry"
+              data-form-type="other"
             />
             <Input
               label="CVV"
@@ -1418,6 +1435,10 @@ export function PaymentScreen({ initialParams }) {
               value={paymentForm.cvv}
               onChange={(event) => handleFieldChange("cvv", event.target.value)}
               error={fieldErrors.cvv}
+              autoComplete="off"
+              inputMode="numeric"
+              name="skybook_card_cvv"
+              data-form-type="other"
             />
             <div className="md:col-span-2">
               <Input
@@ -1428,6 +1449,9 @@ export function PaymentScreen({ initialParams }) {
                   handleFieldChange("billingAddress", event.target.value)
                 }
                 error={fieldErrors.billingAddress}
+                autoComplete="off"
+                name="skybook_billing_address"
+                data-form-type="other"
               />
             </div>
           </div>
@@ -1541,10 +1565,10 @@ function TripRecommendationsSection({
 
   return (
     <PageSection
-      eyebrow="Complete Your Trip"
-      title="Recommended hotels and rental cars"
-      description="These recommendation cards are also reading from your PostgreSQL data."
-    >
+        eyebrow="Complete Your Trip"
+        title="Recommended hotels and rental cars"
+      description="Helpful extras to round out your trip before you finish booking."
+      >
       <div className="grid gap-8 xl:grid-cols-2">
         <div>
           <h3 className="mb-4 text-2xl font-semibold text-slate-900">Recommended Hotels</h3>
@@ -1622,6 +1646,10 @@ function useBookingSnapshot(initialParams) {
   const selectReturnFlight = useBookingStore((state) => state.selectReturnFlight);
   const selectHotel = useBookingStore((state) => state.selectHotel);
   const selectCar = useBookingStore((state) => state.selectCar);
+  const clearFlight = useBookingStore((state) => state.clearFlight);
+  const clearReturnFlight = useBookingStore((state) => state.clearReturnFlight);
+  const clearHotel = useBookingStore((state) => state.clearHotel);
+  const clearCar = useBookingStore((state) => state.clearCar);
   const resetBooking = useBookingStore((state) => state.resetBooking);
   const resolvedFlightId = initialParams?.flight || selectedFlightId || selectedFlight?.id || null;
   const resolvedReturnFlightId =
@@ -1629,15 +1657,19 @@ function useBookingSnapshot(initialParams) {
   const resolvedHotelId = initialParams?.hotel || selectedHotelId || selectedHotel?.id || null;
   const resolvedCarId = initialParams?.car || selectedCarId || selectedCar?.id || null;
 
-  const search = {
-    ...defaultBookingSearch,
-    ...searchState,
-    ...(initialParams?.from ? { from: initialParams.from } : {}),
-    ...(initialParams?.to ? { to: initialParams.to } : {}),
-    ...(initialParams?.departure ? { departure: initialParams.departure } : {}),
-    ...(initialParams?.return ? { returnDate: initialParams.return } : {}),
-    ...(initialParams?.passengers ? { passengers: initialParams.passengers } : {}),
-  };
+  const search = useMemo(
+    () => ({
+      ...defaultBookingSearch,
+      ...searchState,
+      ...(initialParams?.from ? { from: initialParams.from } : {}),
+      ...(initialParams?.to ? { to: initialParams.to } : {}),
+      ...(initialParams?.departure ? { departure: initialParams.departure } : {}),
+      ...(initialParams?.return ? { returnDate: initialParams.return } : {}),
+      ...(initialParams?.passengers ? { passengers: initialParams.passengers } : {}),
+      ...(initialParams?.segments ? { multiCitySegments: parseInitialSegments(initialParams.segments) } : {}),
+    }),
+    [initialParams, searchState],
+  );
 
   const fallbackFlight = {
     id: resolvedFlightId || "0",
@@ -1677,6 +1709,10 @@ function useBookingSnapshot(initialParams) {
     selectReturnFlight,
     selectHotel,
     selectCar,
+    clearFlight,
+    clearReturnFlight,
+    clearHotel,
+    clearCar,
     resetBooking,
   };
 }
@@ -1718,10 +1754,21 @@ function SummaryRow({ label, value, detail, emphasized = false }) {
   );
 }
 
-function SummaryCard({ label, title, detail }) {
+function SummaryCard({ label, title, detail, actionLabel, onAction }) {
   return (
     <article className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-      <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">{label}</p>
+      <div className="flex items-start justify-between gap-4">
+        <p className="text-sm font-semibold uppercase tracking-[0.22em] text-orange-500">{label}</p>
+        {actionLabel && onAction ? (
+          <button
+            type="button"
+            onClick={onAction}
+            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+          >
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
       <p className="mt-3 text-2xl font-semibold text-slate-900">{title}</p>
       <p className="mt-2 text-sm text-slate-600">{detail}</p>
     </article>
@@ -2090,27 +2137,6 @@ function HotelFilterBar({ filters, setFilters }) {
       </div>
 
       <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
-        <p className="text-xl font-semibold text-slate-900">Price Source</p>
-        <div className="mt-3">
-          <select
-            value={filters.priceSource}
-            onChange={(event) =>
-              setFilters((current) => ({
-                ...current,
-                priceSource: event.target.value,
-              }))
-            }
-            className="min-h-11 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-4 text-slate-900 outline-none"
-          >
-            <option value="all">Any source</option>
-            <option value="live">Live prices</option>
-            <option value="reference">Reference prices</option>
-            <option value="pending">Price pending</option>
-          </select>
-        </div>
-      </div>
-
-      <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
         <p className="text-xl font-semibold text-slate-900">Price And Sorting</p>
         <div className="mt-3 grid gap-3">
           <FilterField label="Max nightly price">
@@ -2268,6 +2294,29 @@ function FilterField({ label, children }) {
   );
 }
 
+function parseInitialSegments(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.length > 0
+      ? parsed
+      : defaultBookingSearch.multiCitySegments;
+  } catch {
+    return defaultBookingSearch.multiCitySegments;
+  }
+}
+
+function getStaticHotelReferencePrice(hotel, fallbackHotel = null) {
+  const fallbackPrice = Number(fallbackHotel?.pricePerDay || 0);
+  if (fallbackPrice > 0) {
+    return fallbackPrice;
+  }
+
+  const base = 95;
+  const rating = Number(hotel?.rating || 4);
+  const premium = String(hotel?.name || "").toLowerCase().includes("resort") ? 35 : 0;
+  return Math.max(89, Math.round(base + rating * 24 + premium));
+}
+
 function InfoPanel({ text }) {
   return <div className="mb-5 rounded-[24px] border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">{text}</div>;
 }
@@ -2276,9 +2325,11 @@ function ErrorPanel({ text, className = "" }) {
   return <div className={`rounded-[24px] border border-red-200 bg-red-50 p-4 text-sm text-red-700 ${className}`}>{text}</div>;
 }
 
-function BudgetSidebar({ tripType, flight, hotel, car, duration, compact = false }) {
+function BudgetSidebar({ tripType, flight, returnFlight, hotel, car, duration, compact = false }) {
   const stayDays = Math.max(duration || 1, 1);
-  const flightTotal = flight?.price || 0;
+  const outboundFlightTotal = flight?.price || 0;
+  const returnFlightTotal = returnFlight?.price || 0;
+  const flightTotal = outboundFlightTotal + returnFlightTotal;
   const hotelUnitPrice = hotel?.pricePerDay || 0;
   const hotelTotal = hotelUnitPrice * stayDays;
   const carUnitPrice = car?.pricePerDay || 0;
@@ -2300,7 +2351,14 @@ function BudgetSidebar({ tripType, flight, hotel, car, duration, compact = false
             : "Current flight total"}
       </h3>
       <div className={`text-sm text-slate-600 ${compact ? "mt-5 space-y-3" : "mt-6 space-y-4"}`}>
-        <SummaryRow label="Flight" detail="One-time price" value={formatCurrency(flightTotal)} />
+        <SummaryRow
+          label={tripType === "roundtrip" ? "Outbound flight" : "Flight"}
+          detail="One-time price"
+          value={formatCurrency(outboundFlightTotal)}
+        />
+        {tripType === "roundtrip" ? (
+          <SummaryRow label="Return flight" detail="One-time price" value={formatCurrency(returnFlightTotal)} />
+        ) : null}
         {tripType !== "multicity" ? (
           <>
             <SummaryRow
@@ -2342,11 +2400,11 @@ function buildStepLinks(search, { flightId = null, returnFlightId = null, hotelI
     car:
       isCarOnly
         ? `/car-deals?${buildBookingQuery({ search, carId })}`
-        : isHotelOnly || isMultiCity || !(hasRequiredFlightSelection && hotelId)
+        : isHotelOnly || isMultiCity || !hasRequiredFlightSelection
         ? ""
         : `/car-rental?${buildBookingQuery({ search, flightId, returnFlightId, hotelId, carId })}`,
     summary:
-      isCarOnly || isHotelOnly || isMultiCity || !(hasRequiredFlightSelection && hotelId)
+      isCarOnly || isHotelOnly || isMultiCity || !hasRequiredFlightSelection
         ? ""
         : `/booking-summary?${buildBookingQuery({ search, flightId, returnFlightId, hotelId, carId })}`,
     payment:
@@ -2362,7 +2420,7 @@ function buildStepLinks(search, { flightId = null, returnFlightId = null, hotelI
         ? hasRequiredFlightSelection
           ? `/payment?${buildBookingQuery({ search, flightId, returnFlightId })}`
           : ""
-        : hasRequiredFlightSelection && hotelId
+        : hasRequiredFlightSelection
           ? `/payment?${buildBookingQuery({ search, flightId, returnFlightId, hotelId, carId })}`
           : "",
   };
@@ -2652,8 +2710,11 @@ function MultiCityItineraryCard({ itinerary, index, selected, onSelect }) {
 
       <div className="grid gap-0 lg:grid-cols-[1.4fr_0.6fr]">
         <div className="divide-y divide-slate-200">
-          {itinerary.legs.map((leg) => (
-            <div key={leg.id} className="grid gap-4 px-5 py-5 md:grid-cols-[120px_1fr_120px] md:items-center">
+          {itinerary.legs.map((leg, legIndex) => (
+            <div
+              key={`${leg.id || "leg"}-${legIndex}-${leg.segmentLabel || ""}-${leg.departure || ""}`}
+              className="grid gap-4 px-5 py-5 md:grid-cols-[120px_1fr_120px] md:items-center"
+            >
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
                   {leg.segmentLabel}

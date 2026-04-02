@@ -78,7 +78,7 @@ baggage rules, loyalty programme, and destinations.
 
 Rules:
 - Only provide information about SkyBook and the context supplied.
-- If the context does not support a claim, say you do not know.
+- If the context does not support a claim, state professionally that the information is not currently available.
 - Never invent routes, policies, or prices.
 - Be concise, accurate, and helpful.
 - Prefer clean formatting that is easy to read in chat.
@@ -86,7 +86,7 @@ Rules:
 - If the answer contains categories, use simple headings like "Cabin baggage" or "Checked baggage".
 - Avoid one huge block of text.
 
-Relevant extracts from the SkyBook knowledge base:
+Relevant extracts from the SkyBook travel information library:
 {context}
 """
 
@@ -133,7 +133,8 @@ class RagService:
         chunks = self.fetch_context(question, history)
         if not chunks:
             return (
-                "I could not find a matching knowledge-base answer for that yet.",
+                "The requested information is not currently available in SkyBook's travel information resources. "
+                "Please verify with customer support or check again later.",
                 [],
             )
         context = "\n\n".join(
@@ -187,7 +188,7 @@ class RagService:
 
         vector_path = Path(settings.AI_VECTOR_DB_PATH)
         chroma_path = Path(getattr(settings, "AI_CHROMA_DB_PATH", vector_path / "preprocessed_db"))
-        collection_name = getattr(settings, "AI_RAG_COLLECTION_NAME", "skynest_docs")
+        collection_name = getattr(settings, "AI_RAG_COLLECTION_NAME", "skybook_docs")
         manifest_path = vector_path / ADVANCED_MANIFEST_NAME
 
         documents = self._load_raw_documents()
@@ -273,8 +274,14 @@ Conversation so far:
 User question:
 {question}
 
-Rewrite it as one short, specific search query.
-        Reply only with the rewritten query."""
+Rewrite it as one short, specific KB search query in no more than 15 words.
+Focus on the strongest retrieval anchors such as:
+- destination
+- route
+- visa or baggage policy name
+- hotel or product name
+
+Reply only with the rewritten query."""
         try:
             return self._chat([{"role": "user", "content": prompt}]).strip()
         except Exception as exc:  # pragma: no cover
@@ -294,6 +301,9 @@ Rewrite it as one short, specific search query.
             chunk_lines.append(f"# CHUNK {index}\n{chunk.page_content[:500]}")
         prompt = (
             "Rank the following chunks from most relevant to least relevant for the user question.\n"
+            "Put the single most directly relevant chunk first.\n"
+            "For comparative questions, prefer chunks that mention both compared items.\n"
+            "For multi-part questions, prefer chunks covering the most parts.\n"
             "Return JSON only in the form {\"order\": [1,2,...]}.\n\n"
             f"Question:\n{question}\n\nChunks:\n" + "\n\n".join(chunk_lines)
         )
@@ -690,7 +700,7 @@ Document:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             chroma = PersistentClient(path=manifest.get("chroma_path") or str(getattr(settings, "AI_CHROMA_DB_PATH")))
             self._chroma_collection = chroma.get_or_create_collection(
-                manifest.get("collection_name") or getattr(settings, "AI_RAG_COLLECTION_NAME", "skynest_docs")
+                manifest.get("collection_name") or getattr(settings, "AI_RAG_COLLECTION_NAME", "skybook_docs")
             )
             return self._chroma_collection
         except Exception as exc:  # pragma: no cover
@@ -778,7 +788,7 @@ Document:
     def _build_extract_answer(self, question: str, chunks: list[RagDocument]) -> str:
         top_chunks = chunks[:3]
         query_terms = self._tokenize(question)
-        lines = ["Here is what the SkyBook knowledge base says:"]
+        lines = ["Here is the information currently available from SkyBook:"]
         for chunk in top_chunks:
             title = chunk.metadata.get("title") or chunk.metadata.get("filename") or chunk.metadata.get("source")
             excerpt_lines = []
@@ -796,7 +806,7 @@ Document:
             if not excerpt_lines:
                 excerpt_lines.append(chunk.page_content.strip().splitlines()[0][:220])
             lines.append(f"{title}: {' '.join(excerpt_lines)}")
-        lines.append("If you want, I can narrow this to visa rules, baggage policy, or destination guidance.")
+        lines.append("If helpful, I can narrow this down to visa guidance, baggage policy, or destination details.")
         return "\n".join(lines)
 
     def _extract_title(self, text: str, file_path: Path) -> str:

@@ -82,6 +82,27 @@ def serialize_role(role):
     }
 
 
+def serialize_admin_management_user(admin_user):
+    role = admin_user.role
+    return {
+        "admin_user_id": admin_user.admin_user_id,
+        "email": admin_user.email,
+        "full_name": admin_user.full_name,
+        "is_active": admin_user.is_active,
+        "failed_login_attempts": admin_user.failed_login_attempts,
+        "locked_until": admin_user.locked_until.isoformat() if admin_user.locked_until else None,
+        "last_login_at": admin_user.last_login_at.isoformat() if admin_user.last_login_at else None,
+        "created_at": admin_user.created_at.isoformat() if admin_user.created_at else None,
+        "updated_at": admin_user.updated_at.isoformat() if admin_user.updated_at else None,
+        "role": {
+            "role_id": role.role_id,
+            "name": role.name,
+            "code": role.code,
+            "permissions": role.permissions or [],
+        } if role else None,
+    }
+
+
 def issue_admin_token(admin_user):
     payload = {
         "admin_user_id": admin_user.admin_user_id,

@@ -1,13 +1,13 @@
 import Link from "next/link";
 import HomeHeroTabs from "@/components/travel/HomeHeroTabs";
 import BundleDealsGrid from "@/components/travel/BundleDealsGrid";
+import BookingLookupSection from "@/components/travel/BookingLookupSection";
 import CarDealsSection from "@/components/travel/CarDealsSection";
 import HeroImageSlideshow from "@/components/travel/HeroImageSlideshow";
 import HotelDealsSection from "@/components/travel/HotelDealsSection";
 import SiteFooter from "@/components/travel/SiteFooter";
 import Navbar from "@/components/ui/Navbar";
 import {
-  FeatureCard,
   PageHero,
   PageSection,
   TestimonialCard,
@@ -15,7 +15,6 @@ import {
 import {
   testimonials,
   trendingTrips,
-  whyAiFeatures,
 } from "@/lib/mock-data";
 
 export default function Home() {
@@ -80,17 +79,8 @@ export default function Home() {
             Show more bundles
           </Link>
         </div>
-      </PageSection>
-
-      <PageSection
-        eyebrow="Why AI"
-        title="Why use AI Travel Planner"
-        description="Manual booking is still available, but the AI path reduces the mental work of comparing multiple categories by yourself."
-      >
-        <div className="grid gap-5 lg:grid-cols-3">
-          {whyAiFeatures.map((feature) => (
-            <FeatureCard key={feature.title} {...feature} />
-          ))}
+        <div className="mt-8">
+          <BookingLookupSection />
         </div>
       </PageSection>
 

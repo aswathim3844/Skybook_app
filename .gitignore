@@ -22,3 +22,16 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+
+# Ignore the virtual environment
+venv/
+.venv/
+
+# Ignore temporary files
+tmp*/
+*.tmp
+
+# Ignore Python cache
+__pycache__/
+*.py[cod]
